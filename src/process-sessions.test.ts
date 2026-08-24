@@ -119,8 +119,15 @@ const defaultInputResult = await manager.write({
   sessionId: defaultInteractive.sessionId,
   chars: "hello\n",
 });
-assert.equal(defaultInputResult.running, false);
-assert.match(defaultInputResult.output, /default-input:hello/);
+const defaultSettledResult = defaultInputResult.running && defaultInputResult.sessionId
+  ? await manager.write({
+      workspaceId: "workspace-a",
+      sessionId: defaultInputResult.sessionId,
+      yieldTimeMs: 2_000,
+    })
+  : defaultInputResult;
+assert.equal(defaultSettledResult.running, false);
+assert.match(defaultInputResult.output + defaultSettledResult.output, /default-input:hello/);
 
 const noisyInteractive = await manager.start({
   workspaceId: "workspace-a",

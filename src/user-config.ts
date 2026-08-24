@@ -15,6 +15,9 @@ export interface DevspaceUserConfig {
   allowedRoots?: string[];
   publicBaseUrl?: string | null;
   allowedHosts?: string[];
+  toolMode?: "minimal" | "full" | "codex";
+  widgets?: "off" | "changes" | "full";
+  authMode?: "oauth" | "secure-tunnel";
   stateDir?: string;
   worktreeRoot?: string;
   artifactsEnabled?: boolean;

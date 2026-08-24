@@ -20,8 +20,22 @@ assert.equal(loadConfig(baseEnv).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "minimal" }).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "full" }).toolMode, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "codex" }).toolMode, "codex");
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "orchestrated" }),
+  /Invalid DEVSPACE_TOOL_MODE: orchestrated/,
+);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "0" }).toolMode, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).toolMode, "minimal");
+assert.equal(loadConfig(baseEnv).authMode, "oauth");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_AUTH_MODE: "secure-tunnel" }).authMode, "secure-tunnel");
+assert.throws(
+  () => loadConfig({ ...baseEnv, HOST: "0.0.0.0", DEVSPACE_AUTH_MODE: "secure-tunnel" }),
+  /requires HOST to be loopback-only/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_AUTH_MODE: "invalid" }),
+  /Invalid DEVSPACE_AUTH_MODE: invalid/,
+);
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));

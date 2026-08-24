@@ -7,6 +7,7 @@ import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-
 
 export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
+export type AuthMode = "oauth" | "secure-tunnel";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 100 * 1024 * 1024;
@@ -18,6 +19,7 @@ export interface ServerConfig {
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
+  authMode: AuthMode;
   toolMode: ToolMode;
   widgets: WidgetMode;
   stateDir: string;
@@ -162,6 +164,17 @@ function parseWidgetMode(value: string | undefined): WidgetMode {
   throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
 
+function parseAuthMode(value: string | undefined): AuthMode {
+  if (!value || value === "oauth") return "oauth";
+  if (value === "secure-tunnel") return value;
+  throw new Error(`Invalid DEVSPACE_AUTH_MODE: ${value}`);
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}
+
 function parseRequiredSecret(value: string | undefined, name: string): string {
   const secret = value?.trim();
   if (!secret) {
@@ -214,6 +227,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = parsePublicBaseUrl(
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
+  const toolMode = parseToolMode({ ...env, DEVSPACE_TOOL_MODE: env.DEVSPACE_TOOL_MODE ?? files.config.toolMode });
+  const authMode = parseAuthMode(env.DEVSPACE_AUTH_MODE ?? files.config.authMode);
+  if (authMode === "secure-tunnel" && !isLoopbackHost(host)) {
+    throw new Error("DEVSPACE_AUTH_MODE=secure-tunnel requires HOST to be loopback-only.");
+  }
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -230,8 +248,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
-    toolMode: parseToolMode(env),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
+    authMode,
+    toolMode,
+    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS ?? files.config.widgets),
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     artifactsEnabled:

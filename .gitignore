@@ -3,3 +3,17 @@ dist/
 releases/
 .env
 *.log
+.devpilot-config/
+.devpilot-runtime/
+tools/cloudflared.exe
+tools/tunnel-client.exe
+当前公网MCP地址.txt
+当前DevPilot连接信息.txt
+DevPilot-connection.txt
+nul
+
+# Local abandoned prototypes from pre-release DevPilot experiments.
+src/orchestrated-task-tools.ts
+src/task-manager.test.ts
+src/task-manager.ts
+src/task-store.ts

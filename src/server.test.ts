@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AddressInfo } from "node:net";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,11 +12,52 @@ import { loadConfig, type ServerConfig } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
-import { createMcpServer } from "./server.js";
+import { createMcpServer, createServer as createDevspaceServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
+
+test("secure tunnel advertises no OAuth metadata with empty 404 responses", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-secure-discovery-"));
+  const configDir = join(root, "config");
+  await mkdir(configDir, { recursive: true });
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "secure-tunnel-test-owner-token-long-enough",
+    DEVSPACE_AUTH_MODE: "secure-tunnel",
+    DEVSPACE_SUBAGENTS: "0",
+    HOST: "127.0.0.1",
+    PORT: "7676",
+    DEVSPACE_PUBLIC_BASE_URL: "http://127.0.0.1:7676",
+  });
+  const running = createDevspaceServer(config);
+  const http = await new Promise<ReturnType<typeof running.app.listen>>((resolve, reject) => {
+    const server = running.app.listen(0, "127.0.0.1", () => resolve(server));
+    server.once("error", reject);
+  });
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      http.close((error) => error ? reject(error) : resolve());
+    });
+    await running.close();
+  });
+
+  const address = http.address() as AddressInfo;
+  for (const path of [
+    "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-protected-resource",
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${address.port}${path}`);
+    assert.equal(response.status, 404);
+    assert.equal(await response.text(), "");
+  }
+});
 
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const providerNote = "app-server support is verified on first run";

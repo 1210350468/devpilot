@@ -1,252 +1,222 @@
-<p align="center">
-  <picture>
-    <img src="https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-logo-light.png" alt="DevSpace logo" width="140">
-  </picture>
-</p>
+# DevPilot
 
-<h1 align="center">DevSpace</h1>
+**让 ChatGPT 安全连接你的本地开发环境，并把详细 MCP 调用过程留在本地。**
 
-<p align="center">Bring a Codex-style coding workflow to ChatGPT.</p>
+DevPilot 是基于 [Waishnav/devspace](https://github.com/Waishnav/devspace) 的轻量增强版。它不替代 ChatGPT，也不再造一套 Agent Harness；它专注于三件事：
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
-  <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
-  <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
-</p>
+1. 提供本地中文 Control Center，集中管理 DevSpace / MCP / Tunnel 配置与状态。
+2. 观察 ChatGPT → DevSpace 的 MCP 请求和工具调用，并按 `openai/session` 区分不同 ChatGPT 对话。
+3. 提供 Windows 一键启动入口，在 Cloudflare Quick Tunnel 与 OpenAI Secure MCP Tunnel 之间切换。
 
-[![DevSpace connected to ChatGPT](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)
+> 当前重点平台：**Windows 11 + PowerShell 5.1+**。底层 DevSpace 仍保留原有跨平台能力，但 DevPilot 的一键启动体验目前优先面向 Windows。
 
-**Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
+## 5 分钟开始使用
 
-DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine, expose it through a tunnel you control, and approve the connection with a password only you have.
+### 环境要求
 
-## Sponsors and Special Thanks
-<!-- 
+- Windows 10 / 11
+- Git
+- Node.js `>=22.19 <27`
+- npm
 
-<table>
-  <thead>
-    <tr>
-      <th>Sponsor</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://rebates.ai/">
-          <img
-            src="https://app.rebates.ai/brand/rebates-lockup.svg"
-            alt="Rebates"
-            width="170"
-          >
-        </a>
-      </td>
-      <td>
-        <strong>The ads in your terminal pay you.</strong><br><br>
-        <a href="https://rebates.ai/">Rebates</a> adds one optional
-        sponsored footer to your coding agent and pays you cash back for every
-        session in which it is shown. Turn it off at any time.
-      </td>
-    </tr>
-  </tbody>
-</table>
--->
-<p>
-  DevSpace is open to new sponsors.
-  <a href="https://x.com/wshxnv">Get in touch to become one.</a>
-</p>
+### 方式 A：让 AI 帮你一键安装（最适合新手）
 
-## Installation
-
-DevSpace requires Node `>=22.19 <27`.
-
-Install the DevSpace CLI:
-
-```bash
-npm install -g @waishnav/devspace
-```
-
-Then initialize and start the server:
-
-```bash
-devspace init
-devspace serve
-```
-
-Or run it without a global install:
-
-```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
-```
-
-During setup, DevSpace asks for:
-
-- the local project folders ChatGPT is allowed to open through DevSpace
-- the local port, usually `7676`
-- your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or
-  another reverse proxy
-
-Use the public origin without `/mcp` during setup:
+把下面整段提示词复制给一个**能够操作你本机终端和文件**的 AI 编程助手，例如 Codex、Claude Code 或其他本地 Coding Agent：
 
 ```text
-https://your-tunnel-host.example.com
+请帮我在这台 Windows 电脑上安装并验证 DevPilot：
+https://github.com/1210350468/devpilot.git
+
+目标：让我作为新手最终只需要双击“启动-DevPilot.cmd”即可使用。
+
+请直接执行，不要只给教程。按下面顺序完成：
+
+1. 检查 Git、Node.js、npm 是否可用。DevPilot 要求 Node.js >=22.19 且 <27。
+2. 如果环境缺失，优先使用系统现有包管理器安全安装；不要删除或覆盖我已有的软件环境。如果需要管理员权限，明确告诉我原因。
+3. 把仓库克隆到一个合适的新目录。若目标目录已存在，不要直接覆盖，先检查它是否已经是 DevPilot 仓库。
+4. 在仓库中执行依赖安装、typecheck、build 和 test，修复由本机环境导致的可修复问题，直到项目通过验证。
+5. 检查“启动-DevPilot.cmd”和“关闭-DevPilot.cmd”存在，并确认 PowerShell 启动脚本语法正常。
+6. 不要把 API Key、Tunnel Runtime Key、OAuth Token、Cookie 或其他凭据写进 Git。`.devpilot-config/` 和 `.devpilot-runtime/` 必须保持为本地私有目录。
+7. 第一次使用如果我没有 OpenAI Secure Tunnel 的 Tunnel ID 和 Runtime API Key，就推荐我在启动菜单里选择 Cloudflare Quick Tunnel，不要阻塞安装。
+8. 如果我明确选择 OpenAI Secure MCP Tunnel，再指导我把 Tunnel ID / Runtime API Key 写入本地 `.devpilot-config/openai-tunnel.json`；不要在终端输出或聊天中回显完整 Runtime API Key。
+9. 不要杀掉与 DevPilot 无关的进程，不要修改全局 Git 配置，不要执行 git clean / reset --hard。
+10. 完成后实际启动一次 DevPilot，验证：
+   - 本地 Control Center 可访问；
+   - MCP 服务在线；
+   - 所选 Tunnel 就绪；
+   - 然后告诉我在 ChatGPT 中应该填哪个 MCP URL 或 Tunnel ID。
+11. 最后给我一个非常简短的“以后怎么启动 / 怎么关闭 / 出问题看哪里”的说明。
+
+如果仓库文档与我的机器实际情况冲突，以实际检测结果为准，并把差异说明清楚。
 ```
 
-You will configure your MCP client with the public `/mcp` URL after setup.
+更完整版本见：[AI_INSTALL_PROMPT.md](AI_INSTALL_PROMPT.md)。
 
-When the client connects, DevSpace opens an Owner password approval page. Enter
-the Owner password printed by `devspace init`. It is also stored in:
+### 方式 B：手动安装
 
-```text
-~/.devspace/auth.json
-```
-
-Keep that password private.
-
-## Connect Your MCP Client
-
-The default local endpoint is:
-
-```text
-http://127.0.0.1:7676/mcp
-```
-
-Most users should connect through a public HTTPS tunnel:
-
-```text
-https://your-tunnel-host.example.com/mcp
-```
-
-> [!NOTE]
-> Using DevSpace as an MCP connector isn't against OpenAI's Usage Policies — it's
-> a standard custom App/connector setup, and writing or running code isn't a
-> restricted use case. But your account is governed by your usage, not by
-> DevSpace. Don't point it at anything that would violate your provider's terms.
-> Used normally, you're fine. (Based on OpenAI's Usage Policies and Service Terms
-> as of June 2026.)
-
-## What ChatGPT Can Do
-
-Once connected, ChatGPT can open one of your approved project folders as a
-workspace. From there, it can inspect the repo, make scoped edits, run commands,
-and show you what changed.
-
-DevSpace gives ChatGPT tools to:
-
-- read, write, and edit files inside the opened workspace
-- search code and inspect directories
-- run shell commands for tests, builds, git, and package scripts
-- use isolated Git worktrees for parallel coding sessions
-- follow project instructions from `AGENTS.md` and `CLAUDE.md`
-- discover local agent skills from your skill folders
-- show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
-
-## Mental Model
-
-DevSpace is remote access to selected local folders.
-
-You decide which roots are allowed. The MCP client still has powerful local
-capabilities inside an opened workspace, including shell execution. Treat a
-connected client like a trusted coding partner with access to your machine.
-
-For a normal ChatGPT coding session:
-
-1. Start your tunnel.
-2. Run `devspace serve`.
-3. Connect the MCP client to your public `/mcp` URL.
-4. Approve the connection with the Owner password.
-5. Ask ChatGPT to open a project inside one of your allowed roots.
-
-## Platform Support
-
-DevSpace supports Linux, macOS, and Windows environments with a Bash-compatible
-shell.
-
-| Platform                                          | Status            | Notes                                          |
-| ------------------------------------------------- | ----------------- | ---------------------------------------------- |
-| Linux                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| macOS                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| Windows with Git Bash, WSL, MSYS2, or Cygwin Bash | Supported         | Git Bash is the simplest native Windows setup. |
-| Windows PowerShell or `cmd.exe` only              | Not supported yet | Install Git Bash or use WSL.                   |
-
-Run this to inspect your local setup:
-
-```bash
-devspace doctor
-```
-
-## Documentation
-
-- [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
-- [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
-- [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
-- [Native File Download](https://github.com/Waishnav/devspace/blob/main/docs/artifact-exchange.md)
-- [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
-- [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
-
-## Philosophy
-
-Every piece of software is becoming conversational. Natural language is
-redefining how we interact with tools, workflows, and systems.
-
-My bet is that ChatGPT becomes the operating system for everything. Once we
-reach AGI, we will simply talk to ChatGPT, and it will prompt, coordinate, and
-orchestrate sub-agents that set up the right loops for us.
-
-We are not there yet.
-
-DevSpace is one attempt to fast-forward that future: a way for MCP-capable
-hosts like ChatGPT and Claude to work directly with local project files through
-explicit, inspectable tools.
-
-## Built by Waishnav
-
-I'm Waishnav. I like building opinionated products and tools, and Artifacts is one example.
-
-This year, I began my journey to build a one-person, multi-agent company capable of generating millions in revenue. If you want to follow the failures, wins, lessons, and everything in between, come hang out with me on [X](https://x.com/wshxnv).
-
-
-## More from me
-
-<table>
-  <thead>
-    <tr>
-      <th>Project</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://gitcms.dev/">
-          <img
-            src="https://gitcms.dev/brand/gitcms-logo.svg"
-            alt="GitCMS"
-            width="48"
-          /><br />
-          <strong>GitCMS</strong>
-        </a>
-      </td>
-      <td>
-        <strong>Modern CMS and tooling for markdown based content sites — built for agents and humans.</strong><br><br>
-        Visual editing, editorial workflow, and ChatGPT/Claude content agents, with
-        every post and page stored as files in your repo.
-        <a href="https://gitcms.dev/">Learn more</a>.
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-## Local Development
-
-For working on DevSpace itself:
-
-```bash
-npm install --include=dev
-npm run dev
-npm run typecheck
-npm test
+```powershell
+git clone https://github.com/1210350468/devpilot.git
+cd devpilot
+npm install
 npm run build
-npm run start
 ```
+
+之后双击：
+
+```text
+启动-DevPilot.cmd
+```
+
+启动菜单：
+
+```text
+> Cloudflare Quick Tunnel
+  OpenAI Secure MCP Tunnel
+```
+
+使用 **↑ / ↓** 选择，**Enter** 启动，**Esc** 取消。
+
+首次启动时，如果 `node_modules` 不存在，启动器也会自动执行依赖安装；如果 `dist` 不存在，则会自动构建。
+
+## 两种连接模式
+
+### Cloudflare Quick Tunnel
+
+适合第一次使用和希望快速验证链路的用户。
+
+启动器会：
+
+- 启动 DevPilot / DevSpace MCP：`127.0.0.1:7681`
+- 启动本地 Supervisor：`127.0.0.1:7680`
+- 使用 OAuth 模式
+- 自动下载或复用 `cloudflared`
+- 创建临时 `https://*.trycloudflare.com/mcp`
+- 将公网 MCP URL 复制到剪贴板
+
+然后把启动器给出的完整 `/mcp` 地址添加到支持 Remote MCP 的客户端，并按提示完成 OAuth。
+
+> Cloudflare Quick Tunnel 地址在重新启动后可能变化。
+
+### OpenAI Secure MCP Tunnel
+
+适合已经创建 OpenAI Tunnel、希望本地 MCP 只监听 loopback 的用户。
+
+本地配置文件：
+
+```text
+.devpilot-config/openai-tunnel.json
+```
+
+示例：
+
+```json
+{
+  "tunnelId": "tunnel_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "runtimeApiKey": "YOUR_RUNTIME_API_KEY",
+  "controlPlaneProxy": "http://127.0.0.1:YOUR_PROXY_PORT"
+}
+```
+
+`controlPlaneProxy` 可省略。该配置目录已被 `.gitignore` 排除。
+
+启动器会：
+
+- 使用 `authMode=secure-tunnel`
+- 下载或复用 OpenAI 官方 `tunnel-client`
+- 将本地 MCP 保持在 `127.0.0.1:7681/mcp`
+- 检查 `127.0.0.1:7683/readyz`
+- 支持 OpenAI control-plane 专用 HTTP 代理
+- 检测常见的同 Tunnel ID 多客户端冲突
+
+一个 Tunnel ID 不应同时被两个本地 `tunnel-client` 消费，否则 MCP session 和工具集合可能被拆到不同进程。
+
+## 本地 Control Center
+
+启动后访问：
+
+```text
+http://127.0.0.1:7681/devpilot/
+```
+
+目前主要提供：
+
+- 服务 / Tunnel 状态
+- allowed roots 配置
+- MCP / 认证 / tool mode / widgets 设置
+- ChatGPT 请求观察器
+- 按 ChatGPT 对话区分请求
+- 工具名、参数摘要、HTTP 状态与耗时
+
+第一次启动、且没有已有 DevPilot / DevSpace 配置时，allowed roots 默认只包含 **DevPilot 仓库自身**。请在 Control Center 中添加你确实希望 ChatGPT 能访问的项目目录。
+
+## 端口
+
+| 用途 | 默认地址 |
+| --- | --- |
+| DevPilot / MCP | `127.0.0.1:7681` |
+| Supervisor | `127.0.0.1:7680` |
+| OpenAI Tunnel health/UI | `127.0.0.1:7683` |
+| Control Center | `http://127.0.0.1:7681/devpilot/` |
+
+## 关闭
+
+双击：
+
+```text
+关闭-DevPilot.cmd
+```
+
+关闭脚本会优先读取 `.devpilot-runtime/runtime.json` 中记录的实际端口和 Supervisor PID，只针对当前 DevPilot 管理的服务，不应主动结束无关进程。
+
+## 安全说明
+
+DevPilot 能让远程 MCP 客户端在你批准的本地项目中读取、编辑和执行命令，因此它拥有真实的本机开发权限。
+
+- 只把可信目录加入 `allowedRoots`。
+- Shell 命令以当前 Windows 用户权限运行，不是完整沙箱。
+- 不要公开 `.devpilot-config/`、`.devpilot-runtime/`、Runtime API Key 或 OAuth Token。
+- `widgets=off` 只能关闭 DevSpace 自己提供的 MCP Widget/App UI，**不能强制隐藏 ChatGPT 客户端原生的工具调用提示**。
+
+默认 `.gitignore` 已排除：
+
+```text
+.devpilot-config/
+.devpilot-runtime/
+DevPilot-connection.txt
+当前公网MCP地址.txt
+tools/cloudflared.exe
+tools/tunnel-client.exe
+*.log
+```
+
+## 开发与验证
+
+```powershell
+npm install
+npm run typecheck
+npm run build
+npm test
+```
+
+详细设计与故障说明：
+
+- [DevPilot 技术说明](docs/devpilot.md)
+- [中文使用说明](使用说明-中文.md)
+- [AI 安装提示词](AI_INSTALL_PROMPT.md)
+
+## 与上游 DevSpace 的关系
+
+DevPilot 基于 [Waishnav/devspace](https://github.com/Waishnav/devspace) 修改，并保留原项目的 MIT License 与核心执行模型。
+
+DevPilot 的目标不是替代 DevSpace，而是在其上增加更适合 ChatGPT 本地开发工作流的：
+
+- 中文本地控制中心
+- 请求 / 对话观察器
+- Windows 一键启动与 Tunnel 管理
+- OpenAI Secure MCP Tunnel 适配
+
+感谢 DevSpace 原作者及其贡献者。
+
+## License
+
+MIT。见 [LICENSE](LICENSE)。
