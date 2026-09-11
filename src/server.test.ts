@@ -101,6 +101,7 @@ test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sess
   const discoveryBody = await discovery.json() as {
     result?: {
       supportedVersions?: string[];
+      instructions?: string;
       _meta?: { "io.modelcontextprotocol/serverInfo"?: { version?: string } };
     };
   };
@@ -109,6 +110,11 @@ test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sess
     discoveryBody.result?._meta?.["io.modelcontextprotocol/serverInfo"]?.version,
     DEVSPACE_VERSION,
   );
+  const instructions = discoveryBody.result?.instructions ?? "";
+  assert.match(instructions, /reuse that workspaceId/);
+  assert.match(instructions, /advertised SKILL\.md/);
+  assert.match(instructions, /Never modify project files through bash/);
+  assert.ok(instructions.length < 1_500, `model instructions are too verbose: ${instructions.length}`);
 
   const listed = await postModernMcp(localBaseUrl, "tools/list", {});
   assert.equal(listed.status, 200, await listed.clone().text());
@@ -151,6 +157,42 @@ test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sess
   assert.equal(legacy.status, 200, await legacy.clone().text());
   assert.ok(legacy.headers.get("mcp-session-id"));
   assert.match(await legacy.text(), /"protocolVersion"/);
+});
+
+test("show_changes exposes the aggregate diff to plain MCP hosts", async (t) => {
+  const context = await fixture(t, { git: true, widgets: "changes" });
+  const opened = structuredContent(await callOpen(context.client, context.project, "review"));
+  const workspaceId = opened.workspaceId;
+  assert.equal(typeof workspaceId, "string");
+
+  await writeFile(join(context.project, "README.md"), "goodbye\n");
+  const review = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspaceId },
+  });
+  const structured = structuredContent(review);
+
+  assert.deepEqual(structured.summary, {
+    files: 1,
+    additions: 1,
+    removals: 1,
+  });
+  assert.deepEqual(structured.files, [
+    {
+      path: "README.md",
+      type: "change",
+      additions: 1,
+      removals: 1,
+    },
+  ]);
+  assert.match(structured.patch as string, /-hello\n\+goodbye/);
+
+  const tools = await context.client.listTools();
+  const outputProperties = (tools.tools.find((tool) => tool.name === "show_changes")
+    ?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  assert.ok(outputProperties && "summary" in outputProperties);
+  assert.ok(outputProperties && "files" in outputProperties);
+  assert.ok(outputProperties && "patch" in outputProperties);
 });
 
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
@@ -329,7 +371,11 @@ interface ServerFixture {
 
 async function fixture(
   t: TestContext,
-  options: { git?: boolean; localAgentProviders?: LocalAgentProviderAvailability[] } = {},
+  options: {
+    git?: boolean;
+    localAgentProviders?: LocalAgentProviderAvailability[];
+    widgets?: "off" | "changes" | "full";
+  } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
   const project = join(root, "project");
@@ -363,7 +409,7 @@ async function fixture(
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
-    DEVSPACE_WIDGETS: "full",
+    DEVSPACE_WIDGETS: options.widgets ?? "full",
     DEVSPACE_TOOL_MODE: "full",
     DEVSPACE_SUBAGENTS: options.localAgentProviders ? "1" : "0",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",

@@ -213,28 +213,28 @@ interface ToolLogFields {
 
 function serverInstructions(config: ServerConfig): string {
   const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
-    ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
+    ? " For an attached or generated file that must be added to the workspace, use download_artifact with the native file value, current workspaceId, and a relative destination. Do not reconstruct binary attachments with write/edit or place signed URLs, native file objects, base64, or invented host paths in shell commands or logs."
     : "";
   const showChangesInstruction =
     config.widgets === "changes"
-      ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
+      ? " If files are modified, call show_changes once after the final related change and before the final response."
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Call ${toolNames.openWorkspace} when starting a project or isolated worktree without a usable workspaceId, then reuse that workspaceId. Use ${toolNames.read} for file reads, apply_patch for file changes, exec_command for commands, and write_stdin for running processes. Follow instruction and skill files returned by ${toolNames.openWorkspace}.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
-    ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
-    : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
+    ? `Minimal mode has no ${toolNames.grep}/${toolNames.glob}/${toolNames.ls}; use ${toolNames.shell} with normal CLI search/list commands. `
+    : `Prefer ${toolNames.read}/${toolNames.grep}/${toolNames.glob}/${toolNames.ls} for inspection. `;
 
   const skills = config.skillsEnabled
-    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
+    ? `When a returned skill matches the task, read its advertised SKILL.md before proceeding; only advertised skill files and already-loaded skill directories are readable. `
     : "";
 
-  const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
+  const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}; read any applicable availableAgentsFiles before working in their scope. `;
 
-  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  return `Call ${toolNames.openWorkspace} when starting a project or isolated worktree without a usable workspaceId, then reuse that workspaceId. Open another only when changing project, checkout/worktree mode, isolated worktree, or after workspaceId rejection. ${agentsMd}${skills}${inspection}Use ${toolNames.edit} for targeted changes, ${toolNames.write} for new files or full rewrites, and ${toolNames.shell} for commands. Never modify project files through ${toolNames.shell}; avoid redirection, heredocs, tee, in-place editors, or scripts whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -998,10 +998,10 @@ function registerMcpSurface(
       title: "Read file",
       description:
         [
-          "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed.",
-          "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+          "Read all or part of a file in a workspace.",
+          "Use this for applicable AGENTS.md/CLAUDE.md files returned by open_workspace.",
           config.skillsEnabled
-            ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+            ? "For a matching skill, read the advertised SKILL.md before files in that loaded skill directory."
             : "",
         ]
           .filter(Boolean)
@@ -1014,8 +1014,8 @@ function registerMcpSurface(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-              : "File path to read, relative to the workspace root.",
+              ? "Path relative to the workspace root, or an advertised skill path."
+              : "Path relative to the workspace root.",
           ),
         offset: z
           .number()
@@ -1342,7 +1342,11 @@ function registerMcpSurface(
             .string()
             .describe(workspaceIdDescription),
         },
-        outputSchema: resultOutputSchema(),
+        outputSchema: resultOutputSchema({
+          summary: reviewSummaryOutputSchema,
+          files: z.array(reviewFileOutputSchema),
+          patch: z.string(),
+        }),
         ...toolWidgetDescriptorMeta(config, "show_changes"),
         annotations: { readOnlyHint: true },
       },
@@ -1378,6 +1382,9 @@ function registerMcpSurface(
           },
           structuredContent: {
             result: contentText(content),
+            summary: review.summary,
+            files: review.files,
+            patch: review.patch,
           },
         };
       },

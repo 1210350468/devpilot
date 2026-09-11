@@ -179,6 +179,8 @@ legacy Streamable HTTP session
 - WorkspaceRegistry 的内存上下文缓存限制为最近使用的 32 个 workspace，超出后按 LRU 驱逐，持久化 session 仍可按需恢复；
 - 上游某些提交把 cache 优化与 Skill 读取权限放宽绑在一起，DevPilot 只吸收 cache 部分，继续要求先加载已广告的 `SKILL.md` 后才能访问对应 Skill 目录；
 - 与现有 8-tool surface、Secure Tunnel、Request Inspector 无直接收益的 process/tool-surface 重构继续保持 HOLD。
+- `show_changes` 除 Widget `_meta` 外，也把 `summary/files/patch` 放入 `structuredContent`，普通 MCP host 可直接取得完整 aggregate diff；
+- 模型侧 server/tool instructions 已压缩重复话术，但仍保留 workspaceId 复用、Skill 先读、Shell 禁止写文件、附件不得伪造路径/内容等关键边界，并由回归测试限制说明继续膨胀。
 
 ## 请求观察器与对话隔离
 
