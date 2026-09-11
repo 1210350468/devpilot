@@ -18,6 +18,7 @@ export interface DevspaceUserConfig {
   toolMode?: "minimal" | "full" | "codex";
   widgets?: "off" | "changes" | "full";
   authMode?: "oauth" | "secure-tunnel";
+  oauthAllowedResourceUrls?: string[];
   stateDir?: string;
   worktreeRoot?: string;
   artifactsEnabled?: boolean;

@@ -119,6 +119,7 @@ assert.throws(
 
 assert.equal(loadConfig(baseEnv).oauth.ownerToken, "test-owner-token-that-is-long-enough");
 assert.deepEqual(loadConfig(baseEnv).oauth.scopes, ["devspace"]);
+assert.deepEqual(loadConfig(baseEnv).oauth.allowedResourceUrls, []);
 assert.deepEqual(loadConfig(baseEnv).oauth.allowedRedirectHosts, [
   "chatgpt.com",
   "localhost",
@@ -132,9 +133,22 @@ assert.deepEqual(
   ["devspace", "admin"],
 );
 assert.deepEqual(
+  loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ALLOWED_RESOURCE_URLS: "https://tunnel.example.com/v1/mcp/tunnel_123,http://127.0.0.1:7781/mcp" }).oauth
+    .allowedResourceUrls,
+  ["https://tunnel.example.com/v1/mcp/tunnel_123", "http://127.0.0.1:7781/mcp"],
+);
+assert.deepEqual(
   loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS: "chatgpt.com,example.com" }).oauth
     .allowedRedirectHosts,
   ["chatgpt.com", "example.com"],
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ALLOWED_RESOURCE_URLS: "http://example.com/mcp" }),
+  /Use HTTPS, or HTTP on a loopback host/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ALLOWED_RESOURCE_URLS: "https://example.com/mcp?token=secret" }),
+  /query strings, and fragments are not allowed/,
 );
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "120" }).oauth
@@ -187,6 +201,7 @@ writeFileSync(
     port: 8787,
     allowedRoots: [process.cwd()],
     publicBaseUrl: "https://devspace.example.com",
+    oauthAllowedResourceUrls: ["https://tunnel.example.com/v1/mcp/tunnel_123"],
     subagents: true,
     artifactsEnabled: true,
     artifactMaxFileBytes: 321,
@@ -203,6 +218,7 @@ const fileConfig = loadConfig({ DEVSPACE_CONFIG_DIR: configDir });
 assert.equal(fileConfig.port, 8787);
 assert.equal(fileConfig.oauth.ownerToken, "persisted-owner-token-long-enough");
 assert.equal(fileConfig.publicBaseUrl, "https://devspace.example.com");
+assert.deepEqual(fileConfig.oauth.allowedResourceUrls, ["https://tunnel.example.com/v1/mcp/tunnel_123"]);
 assert.equal(fileConfig.subagents, true);
 assert.equal(fileConfig.artifactsEnabled, true);
 assert.equal(fileConfig.artifactMaxFileBytes, 321);

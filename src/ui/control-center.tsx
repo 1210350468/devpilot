@@ -32,6 +32,7 @@ interface SettingsResponse {
     toolMode: "minimal" | "full" | "codex";
     widgets: "off" | "changes" | "full";
     publicBaseUrl: string;
+    oauthAllowedResourceUrls: string[];
   };
   saved: Record<string, unknown>;
 }
@@ -265,6 +266,9 @@ function SettingsView({ settings, status, onSaved }: { settings: SettingsRespons
   const [toolMode, setToolMode] = useState<"minimal" | "full" | "codex">(settings?.effective.toolMode ?? "full");
   const [widgets, setWidgets] = useState<"off" | "changes" | "full">(settings?.effective.widgets ?? "changes");
   const [publicBaseUrl, setPublicBaseUrl] = useState(settings?.effective.publicBaseUrl ?? "");
+  const [oauthAllowedResourceUrls, setOauthAllowedResourceUrls] = useState(
+    (settings?.effective.oauthAllowedResourceUrls ?? []).join("\n"),
+  );
   const [message, setMessage] = useState<string>();
 
   useEffect(() => {
@@ -276,6 +280,7 @@ function SettingsView({ settings, status, onSaved }: { settings: SettingsRespons
     setToolMode(settings.effective.toolMode);
     setWidgets(settings.effective.widgets);
     setPublicBaseUrl(settings.effective.publicBaseUrl);
+    setOauthAllowedResourceUrls(settings.effective.oauthAllowedResourceUrls.join("\n"));
   }, [settings?.configPath]);
 
   const save = async () => {
@@ -292,6 +297,10 @@ function SettingsView({ settings, status, onSaved }: { settings: SettingsRespons
           toolMode,
           widgets,
           publicBaseUrl,
+          oauthAllowedResourceUrls: oauthAllowedResourceUrls
+            .split(/\r?\n|,/)
+            .map((item) => item.trim())
+            .filter(Boolean),
         }),
       });
       if (!response.ok) throw new Error(await response.text());
@@ -311,6 +320,7 @@ function SettingsView({ settings, status, onSaved }: { settings: SettingsRespons
       <label className="form-row"><span>ChatGPT 工具 UI</span><select value={widgets} onChange={(e) => setWidgets(e.target.value as typeof widgets)}><option value="off">关闭 widgets</option><option value="changes">只显示变更汇总</option><option value="full">完整 widgets</option></select></label>
       <label className="form-row vertical"><span>允许目录</span><textarea value={roots} onChange={(e) => setRoots(e.target.value)} rows={4} /></label>
       <label className="form-row vertical"><span>公网 MCP 地址（仅 OAuth 模式）</span><input value={publicBaseUrl} disabled={authMode === "secure-tunnel"} onChange={(e) => setPublicBaseUrl(e.target.value)} /></label>
+      <label className="form-row vertical"><span>OAuth Resource 别名（高级，每行一个完整 URL）</span><textarea value={oauthAllowedResourceUrls} disabled={authMode === "secure-tunnel"} onChange={(e) => setOauthAllowedResourceUrls(e.target.value)} rows={3} placeholder="https://tunnel.example.com/v1/mcp/tunnel_123" /></label>
       <div className="settings-actions"><button className="refresh-button" onClick={() => void save()}>保存设置</button><span>{message ?? ""}</span></div>
     </Panel>
     <Panel title="工具调用降噪" subtitle="能控制的是 DevSpace 自己提供给 ChatGPT 的 UI，不是 ChatGPT 客户端本身。">

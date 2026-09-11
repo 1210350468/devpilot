@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Express, NextFunction, Request, Response } from "express";
 import express from "express";
-import type { ServerConfig } from "./config.js";
+import { normalizeOAuthResourceUrls, type ServerConfig } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import type { LocalAgentClient } from "./local-agent-client.js";
 import type { RequestObserver } from "./request-observer.js";
@@ -116,6 +116,7 @@ export function registerControlCenter(options: RegisterControlCenterOptions): vo
         toolMode: config.toolMode,
         widgets: config.widgets,
         publicBaseUrl: config.publicBaseUrl,
+        oauthAllowedResourceUrls: config.oauth.allowedResourceUrls,
       },
       saved: files.config,
     });
@@ -134,6 +135,16 @@ export function registerControlCenter(options: RegisterControlCenterOptions): vo
     if (body.toolMode === "minimal" || body.toolMode === "full" || body.toolMode === "codex") next.toolMode = body.toolMode;
     if (body.widgets === "off" || body.widgets === "changes" || body.widgets === "full") next.widgets = body.widgets;
     if (typeof body.publicBaseUrl === "string") next.publicBaseUrl = body.publicBaseUrl.trim() || null;
+    if (Array.isArray(body.oauthAllowedResourceUrls) && body.oauthAllowedResourceUrls.every((item) => typeof item === "string")) {
+      try {
+        next.oauthAllowedResourceUrls = normalizeOAuthResourceUrls(
+          body.oauthAllowedResourceUrls.map((item) => item.trim()).filter(Boolean),
+        );
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+    }
     const configPath = writeDevspaceConfig(next);
     res.json({ ok: true, restartRequired: true, configPath, saved: next });
   });

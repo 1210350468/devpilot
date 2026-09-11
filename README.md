@@ -95,7 +95,7 @@ npm run build
 
 然后把启动器给出的完整 `/mcp` 地址添加到支持 Remote MCP 的客户端，并按提示完成 OAuth。
 
-> Cloudflare Quick Tunnel 地址在重新启动后可能变化。
+> Cloudflare Quick Tunnel 地址在重新启动后可能变化。若你的 OAuth 客户端通过额外的完整 resource URL 别名访问同一 MCP，可在 Control Center 的“OAuth Resource 别名”中显式加入；普通 Quick Tunnel 用户无需配置。
 
 ### OpenAI Secure MCP Tunnel
 

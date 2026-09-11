@@ -130,6 +130,8 @@ CONTROL_PLANE_HTTP_PROXY
 
 Cloudflare OAuth 模式仍由 MCP SDK 的 `mcpAuthRouter` 提供标准 OAuth metadata。
 
+如果同一个 OAuth MCP 通过额外的**完整 resource URL** 暴露（例如反向代理或兼容层给出的 `/v1/mcp/...` 别名），可在 Control Center 的“OAuth Resource 别名”中逐行配置，或使用 `DEVSPACE_OAUTH_ALLOWED_RESOURCE_URLS`。别名必须是 HTTPS；HTTP 仅允许 loopback。它们只扩展 token resource policy，不改变 discovery 地址或代理路由。authorization code 与 refresh token 都继续绑定其原始 resource；从配置中删除某个别名并重启后，绑定该别名的旧 refresh token 不能继续换取新 token。
+
 ## Tunnel ID 独占约束
 
 一个 Tunnel ID 只能对应一个实际运行的本地 `tunnel-client` 消费者。
@@ -182,7 +184,8 @@ legacy Streamable HTTP session
 - `show_changes` 除 Widget `_meta` 外，也把 `summary/files/patch` 放入 `structuredContent`，普通 MCP host 可直接取得完整 aggregate diff；
 - 模型侧 server/tool instructions 已压缩重复话术，但仍保留 workspaceId 复用、Skill 先读、Shell 禁止写文件、附件不得伪造路径/内容等关键边界，并由回归测试限制说明继续膨胀；
 - 关闭服务时会先等待正在进行的 modern MCP HTTP 请求完整结束并 flush 响应，再关闭 modern handler，避免工具实际成功但客户端因 shutdown 被截成 HTTP 499；
-- modern MCP handler 与 Node adapter 共用同一错误日志入口；legacy/modern 的显式协议分流策略保持不变，不借此切换上游新的 stateless legacy 策略。
+- modern MCP handler 与 Node adapter 共用同一错误日志入口；legacy/modern 的显式协议分流策略保持不变，不借此切换上游新的 stateless legacy 策略；
+- OAuth 模式支持显式 resource URL aliases，并在 authorization-code exchange、refresh-token rotation 与 `/mcp` bearer 校验三处统一执行同一 resource policy；Secure Tunnel 模式不受影响。
 
 ## 请求观察器与对话隔离
 

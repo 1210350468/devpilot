@@ -14,6 +14,7 @@ const oauthConfig = {
   accessTokenTtlSeconds: 3600,
   refreshTokenTtlSeconds: 2592000,
   scopes: ["devspace"],
+  allowedResourceUrls: [],
   allowedRedirectHosts: ["chatgpt.com"],
 };
 const mcpUrl = new URL("https://agent.example.com/mcp");
@@ -25,6 +26,7 @@ try {
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
+  await testResourceAliasPolicy(join(root, "resource-alias"));
 } finally {
   await rm(root, { recursive: true, force: true });
 }
@@ -182,6 +184,55 @@ function testTransactionalTokenRotation(stateDir: string): void {
     assert.equal(store.getRefreshToken("losing-refresh-hash"), undefined);
   } finally {
     store.close();
+  }
+}
+
+async function testResourceAliasPolicy(stateDir: string): Promise<void> {
+  const alias = new URL("https://tunnel.example.com/v1/mcp/tunnel_123");
+  const aliasedConfig = { ...oauthConfig, allowedResourceUrls: [alias.href] };
+  const provider = new SingleUserOAuthProvider(aliasedConfig, mcpUrl, stateDir);
+  const client = await provider.clientsStore.registerClient?.({
+    redirect_uris: [redirectUri],
+    client_name: "ChatGPT",
+  });
+  assert.ok(client);
+  assert.equal(provider.isResourceAllowed(alias), true);
+  assert.equal(provider.isResourceAllowed(new URL("https://other.example.com/mcp")), false);
+
+  const code = "code-alias-123";
+  provider["codes"].set(code, {
+    clientId: client.client_id,
+    params: {
+      redirectUri,
+      codeChallenge: "challenge",
+      scopes: ["devspace"],
+      resource: alias,
+    },
+    expiresAtMs: Date.now() + 60_000,
+  });
+  await assert.rejects(
+    provider.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl),
+    InvalidGrantError,
+  );
+
+  const issued = await provider.exchangeAuthorizationCode(
+    client,
+    code,
+    undefined,
+    redirectUri,
+    alias,
+  );
+  assert.ok(issued.refresh_token);
+  provider.close();
+
+  const tightenedProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  try {
+    await assert.rejects(
+      tightenedProvider.exchangeRefreshToken(client, issued.refresh_token, ["devspace"], alias),
+      InvalidGrantError,
+    );
+  } finally {
+    tightenedProvider.close();
   }
 }
 

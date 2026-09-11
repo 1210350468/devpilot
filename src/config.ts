@@ -129,6 +129,30 @@ function parseStringList(value: string | undefined, fallback: string[]): string[
   return entries && entries.length > 0 ? entries : fallback;
 }
 
+export function normalizeOAuthResourceUrls(entries: string[]): string[] {
+  return Array.from(new Set(entries.map((entry) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      throw new Error(`Invalid OAuth resource URL: ${entry}`);
+    }
+
+    const loopbackHttp = parsed.protocol === "http:" && isLoopbackHost(parsed.hostname);
+    if (parsed.protocol !== "https:" && !loopbackHttp) {
+      throw new Error(`Invalid OAuth resource URL: ${entry}. Use HTTPS, or HTTP on a loopback host.`);
+    }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error(`Invalid OAuth resource URL: ${entry}. Credentials, query strings, and fragments are not allowed.`);
+    }
+    return parsed.href;
+  })));
+}
+
+function parseOAuthResourceUrls(value: string | undefined, fallback: string[]): string[] {
+  return normalizeOAuthResourceUrls(parseStringList(value, fallback));
+}
+
 function parsePositiveInteger(
   value: string | undefined,
   fallback: number,
@@ -186,7 +210,11 @@ function parseRequiredSecret(value: string | undefined, name: string): string {
   return secret;
 }
 
-function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined): OAuthConfig {
+function parseOAuthConfig(
+  env: NodeJS.ProcessEnv,
+  ownerToken: string | undefined,
+  configuredResourceUrls: string[] | undefined,
+): OAuthConfig {
   return {
     ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
     accessTokenTtlSeconds: parsePositiveInteger(
@@ -200,6 +228,10 @@ function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined
       "DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS",
     ),
     scopes: parseStringList(env.DEVSPACE_OAUTH_SCOPES, ["devspace"]),
+    allowedResourceUrls: parseOAuthResourceUrls(
+      env.DEVSPACE_OAUTH_ALLOWED_RESOURCE_URLS,
+      configuredResourceUrls ?? [],
+    ),
     allowedRedirectHosts: parseStringList(env.DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS, [
       "chatgpt.com",
       "localhost",
@@ -244,7 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   return {
     host,
     port,
-    oauth: parseOAuthConfig(env, files.auth.ownerToken),
+    oauth: parseOAuthConfig(env, files.auth.ownerToken, files.config.oauthAllowedResourceUrls),
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
