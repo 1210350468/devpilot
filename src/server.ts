@@ -116,6 +116,26 @@ interface RunningServer {
   close(): Promise<void>;
 }
 
+type TrackToolActivity = <T>(operation: () => Promise<T>) => Promise<T>;
+
+class ToolActivityTracker {
+  private readonly active = new Set<Promise<unknown>>();
+
+  readonly track: TrackToolActivity = <T>(operation: () => Promise<T>): Promise<T> => {
+    const promise = operation();
+    this.active.add(promise);
+    const remove = () => this.active.delete(promise);
+    void promise.then(remove, remove);
+    return promise;
+  };
+
+  async waitForIdle(): Promise<void> {
+    while (this.active.size > 0) {
+      await Promise.allSettled(Array.from(this.active));
+    }
+  }
+}
+
 type ToolContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
@@ -1742,6 +1762,7 @@ export function createServer(
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
+  const toolActivities = new ToolActivityTracker();
   const localAgentProviders = config.subagents
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];
@@ -1757,6 +1778,12 @@ export function createServer(
       incomingArtifactAdapters,
     );
   });
+  const logModernMcpHandlerError = (error: Error) => logEvent(
+    config.logging,
+    "error",
+    "mcp_modern_adapter_error",
+    modernMcpAdapterErrorLogFields(error),
+  );
   const modernMcpHandler = createMcpHandler(() => {
     const adapter = createModernMcpServerAdapter(
       mcpServerInfo(),
@@ -1764,14 +1791,12 @@ export function createServer(
     );
     bindModernMcpSurface(adapter.registrationTarget);
     return adapter.server;
-  }, { legacy: "reject" });
+  }, {
+    legacy: "reject",
+    onerror: logModernMcpHandlerError,
+  });
   const modernNodeHandler = toNodeHandler(modernMcpHandler, {
-    onerror: (error) => logEvent(
-      config.logging,
-      "error",
-      "mcp_modern_adapter_error",
-      modernMcpAdapterErrorLogFields(error),
-    ),
+    onerror: logModernMcpHandlerError,
   });
 
   const logSessionCloseResults = (
@@ -1946,7 +1971,7 @@ export function createServer(
     try {
       const webRequest = await toWebRequest(req, req.body);
       if (!await isLegacyRequest(webRequest, req.body)) {
-        await modernNodeHandler(req, res, req.body);
+        await toolActivities.track(() => modernNodeHandler(req, res, req.body));
         return;
       }
 
@@ -2015,6 +2040,7 @@ export function createServer(
     close: () => {
       closePromise ??= (async () => {
         clearInterval(sessionCleanupTimer);
+        await toolActivities.waitForIdle();
         try {
           await modernMcpHandler.close();
         } catch (error) {

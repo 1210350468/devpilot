@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -157,6 +157,77 @@ test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sess
   assert.equal(legacy.status, 200, await legacy.clone().text());
   assert.ok(legacy.headers.get("mcp-session-id"));
   assert.match(await legacy.text(), /"protocolVersion"/);
+});
+
+test("server shutdown waits for an active modern MCP tool call", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devpilot-shutdown-test-"));
+  const project = join(root, "project");
+  await mkdir(project, { recursive: true });
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(root, ".config"),
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_STATE_DIR: join(root, ".state"),
+    DEVSPACE_AUTH_MODE: "secure-tunnel",
+    DEVSPACE_OAUTH_OWNER_TOKEN: "shutdown-test-owner-token-long-enough",
+    DEVSPACE_SUBAGENTS: "0",
+    DEVSPACE_WIDGETS: "off",
+    DEVSPACE_TOOL_MODE: "full",
+    HOST: "127.0.0.1",
+    PORT: "7781",
+    DEVSPACE_PUBLIC_BASE_URL: "http://127.0.0.1:7781",
+  });
+  const running = createDevspaceServer(config, { incomingArtifactAdapters: [] });
+  const http = await new Promise<ReturnType<typeof running.app.listen>>((resolve, reject) => {
+    const server = running.app.listen(0, "127.0.0.1", () => resolve(server));
+    server.once("error", reject);
+  });
+
+  try {
+    const address = http.address() as AddressInfo;
+    const localBaseUrl = `http://127.0.0.1:${address.port}`;
+    const opened = await postModernMcp(localBaseUrl, "tools/call", {
+      name: "open_workspace",
+      arguments: { path: project },
+      _meta: { "openai/session": "shutdown-test" },
+    });
+    const openBody = await opened.json() as {
+      result?: { structuredContent?: { workspaceId?: string } };
+    };
+    const workspaceId = openBody.result?.structuredContent?.workspaceId;
+    assert.equal(typeof workspaceId, "string");
+
+    const command = [
+      "const fs=require('node:fs')",
+      "fs.writeFileSync('started','')",
+      "const timer=setInterval(()=>{if(fs.existsSync('release')) clearInterval(timer)},10)",
+    ].join(";");
+    const toolCall = postModernMcp(localBaseUrl, "tools/call", {
+      name: "bash",
+      arguments: {
+        workspaceId,
+        command: `node -e \"${command}\"`,
+        timeout: 10,
+      },
+    });
+    await waitForFile(join(project, "started"));
+
+    let shutdownFinished = false;
+    const shutdown = running.close().then(() => {
+      shutdownFinished = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(shutdownFinished, false);
+
+    await writeFile(join(project, "release"), "");
+    const toolResponse = await toolCall;
+    assert.equal(toolResponse.status, 200, await toolResponse.clone().text());
+    await shutdown;
+    assert.equal(shutdownFinished, true);
+  } finally {
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+    await running.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("show_changes exposes the aggregate diff to plain MCP hosts", async (t) => {
@@ -451,6 +522,18 @@ async function fixture(
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assert.fail(`Timed out waiting for ${path}`);
 }
 
 function postModernMcp(
