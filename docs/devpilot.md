@@ -142,6 +142,35 @@ Cloudflare OAuth 模式仍由 MCP SDK 的 `mcpAuthRouter` 提供标准 OAuth met
 
 启动器会检查正在运行的 `codex-chatgpt-web` tunnel-client 及其 profile；若它已经占用了 DevPilot 配置的 Tunnel ID，OpenAI 启动会直接失败并要求使用独立 Tunnel ID。
 
+## MCP 双协议兼容
+
+DevPilot 的协议层采用兼容式升级，而不是直接替换现有执行层：
+
+```text
+modern MCP 2026-07-28
+        │
+        ├─ MCP 2.x per-request handler
+        │
+        └──────────────┐
+                       ▼
+             DevPilot 现有工具注册面
+                       ▲
+        ┌──────────────┘
+        │
+legacy Streamable HTTP session
+2025-06-18 等既有客户端
+```
+
+关键约束：
+
+- 正式工具面仍是 `open_workspace/read/write/edit/grep/glob/ls/bash`；
+- modern 与 legacy 两条路径复用同一套工具定义和 handler；
+- modern 路径不依赖旧 `mcp-session-id`；legacy 路径继续保留现有 session registry；
+- `secure-tunnel` 的 loopback-only、本地空 OAuth discovery 404、Request Inspector 和 `openai/session` 对话隔离保持不变；
+- 不因为同步上游协议能力就引入第二套 Orchestrator 或直接切换到 Codex-style tool surface。
+
+验收覆盖 modern `server/discover`、`tools/list`、真实 `tools/call`、legacy `initialize` + session ID，以及完整 `npm test/typecheck/build`。
+
 ## 请求观察器与对话隔离
 
 请求观察器记录最近的 MCP/HTTP 请求，包括：

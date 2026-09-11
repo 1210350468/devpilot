@@ -130,6 +130,17 @@ npm run build
 
 一个 Tunnel ID 不应同时被两个本地 `tunnel-client` 消费，否则 MCP session 和工具集合可能被拆到不同进程。
 
+## MCP 协议兼容
+
+DevPilot 在保持现有 8-tool surface（`open_workspace/read/write/edit/grep/glob/ls/bash`）不变的前提下，同时兼容：
+
+- MCP `2026-07-28` modern per-request/stateless 路径；
+- MCP `2025-06-18` 等既有 Streamable HTTP session 客户端。
+
+modern 请求由 MCP 2.x handler 处理，legacy 请求仍走原有 session registry。两条路径复用同一套工具注册逻辑，因此升级协议层不会把 DevPilot 的正式工具面替换成上游 Codex-style surface，也不会改变 OpenAI Secure MCP Tunnel 的 loopback-only 约束。
+
+回归测试会同时验证 modern discovery/tools/call、legacy initialize/session、Secure Tunnel discovery 404 以及原有 workspace conversation reuse。
+
 ## 本地 Control Center
 
 启动后访问：

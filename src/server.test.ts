@@ -59,6 +59,92 @@ test("secure tunnel advertises no OAuth metadata with empty 404 responses", asyn
   }
 });
 
+test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sessions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devpilot-modern-http-test-"));
+  const configDir = join(root, "config");
+  const project = join(root, "project");
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, "AGENTS.md"), "project instructions\n");
+
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_STATE_DIR: join(root, ".state"),
+    DEVSPACE_AUTH_MODE: "secure-tunnel",
+    DEVSPACE_OAUTH_OWNER_TOKEN: "secure-tunnel-modern-test-owner-token-long-enough",
+    DEVSPACE_SUBAGENTS: "0",
+    DEVSPACE_WIDGETS: "off",
+    DEVSPACE_TOOL_MODE: "full",
+    HOST: "127.0.0.1",
+    PORT: "7781",
+    DEVSPACE_PUBLIC_BASE_URL: "http://127.0.0.1:7781",
+  });
+  const running = createDevspaceServer(config, { incomingArtifactAdapters: [] });
+  const http = await new Promise<ReturnType<typeof running.app.listen>>((resolve, reject) => {
+    const server = running.app.listen(0, "127.0.0.1", () => resolve(server));
+    server.once("error", reject);
+  });
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      http.close((error) => error ? reject(error) : resolve());
+    });
+    await running.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const address = http.address() as AddressInfo;
+  const localBaseUrl = `http://127.0.0.1:${address.port}`;
+
+  const discovery = await postModernMcp(localBaseUrl, "server/discover", {});
+  assert.equal(discovery.status, 200, await discovery.clone().text());
+  const discoveryBody = await discovery.json() as {
+    result?: { supportedVersions?: string[] };
+  };
+  assert.ok(discoveryBody.result?.supportedVersions?.includes("2026-07-28"));
+
+  const listed = await postModernMcp(localBaseUrl, "tools/list", {});
+  assert.equal(listed.status, 200, await listed.clone().text());
+  const listBody = await listed.json() as {
+    result?: { tools?: Array<{ name?: string }> };
+  };
+  const toolNames = new Set(listBody.result?.tools?.map((tool) => tool.name));
+  for (const expected of ["open_workspace", "read", "write", "edit", "grep", "glob", "ls", "bash"]) {
+    assert.ok(toolNames.has(expected), `missing modern MCP tool: ${expected}`);
+  }
+
+  const called = await postModernMcp(localBaseUrl, "tools/call", {
+    name: "open_workspace",
+    arguments: { path: project },
+    _meta: { "openai/session": "modern-http-test" },
+  });
+  assert.equal(called.status, 200, await called.clone().text());
+  const callBody = await called.json() as {
+    result?: { structuredContent?: { workspaceId?: string } };
+  };
+  assert.equal(typeof callBody.result?.structuredContent?.workspaceId, "string");
+
+  const legacy = await fetch(`${localBaseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "legacy-initialize",
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "devpilot-legacy-test", version: "1.0.0" },
+      },
+    }),
+  });
+  assert.equal(legacy.status, 200, await legacy.clone().text());
+  assert.ok(legacy.headers.get("mcp-session-id"));
+  assert.match(await legacy.text(), /"protocolVersion"/);
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const providerNote = "app-server support is verified on first run";
   const context = await fixture(t, {
@@ -311,6 +397,50 @@ async function fixture(
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
+}
+
+function postModernMcp(
+  localBaseUrl: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<Response> {
+  const mcpName = typeof params.name === "string"
+    ? params.name
+    : typeof params.uri === "string"
+      ? params.uri
+      : undefined;
+  return fetch(`${localBaseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-method": method,
+      "mcp-protocol-version": "2026-07-28",
+      ...(mcpName ? { "mcp-name": mcpName } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: `modern-${method}`,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          ...recordValue(params._meta),
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+          "io.modelcontextprotocol/clientInfo": {
+            name: "devpilot-modern-http-test",
+            version: "1.0.0",
+          },
+        },
+      },
+    }),
+  });
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 async function callOpen(
