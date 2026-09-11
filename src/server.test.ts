@@ -13,6 +13,7 @@ import type { LocalAgentProviderAvailability } from "./local-agent-availability.
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createMcpServer, createServer as createDevspaceServer } from "./server.js";
+import { DEVSPACE_VERSION } from "./version.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 
@@ -98,9 +99,16 @@ test("secure-tunnel HTTP endpoint serves modern MCP while preserving legacy sess
   const discovery = await postModernMcp(localBaseUrl, "server/discover", {});
   assert.equal(discovery.status, 200, await discovery.clone().text());
   const discoveryBody = await discovery.json() as {
-    result?: { supportedVersions?: string[] };
+    result?: {
+      supportedVersions?: string[];
+      _meta?: { "io.modelcontextprotocol/serverInfo"?: { version?: string } };
+    };
   };
   assert.ok(discoveryBody.result?.supportedVersions?.includes("2026-07-28"));
+  assert.equal(
+    discoveryBody.result?._meta?.["io.modelcontextprotocol/serverInfo"]?.version,
+    DEVSPACE_VERSION,
+  );
 
   const listed = await postModernMcp(localBaseUrl, "tools/list", {});
   assert.equal(listed.status, 200, await listed.clone().text());

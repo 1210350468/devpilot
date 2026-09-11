@@ -88,6 +88,8 @@ type DirectoryOps = {
   mkdir: (path: string, options: { recursive: true }) => Promise<unknown>;
 };
 
+const MAX_CACHED_WORKSPACES = 32;
+
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
   private readonly pendingCheckoutOpens = new Map<string, Promise<WorkspaceContext>>();
@@ -245,6 +247,8 @@ export class WorkspaceRegistry {
   getWorkspace(workspaceId: string): Workspace {
     const workspace = this.workspaces.get(workspaceId);
     if (workspace) {
+      this.workspaces.delete(workspaceId);
+      this.workspaces.set(workspaceId, workspace);
       this.store?.touchSession(workspaceId);
       return workspace;
     }
@@ -278,7 +282,7 @@ export class WorkspaceRegistry {
       activatedSkillDirs: new Set(),
     };
     this.store?.touchSession(workspaceId);
-    this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+    this.rememberWorkspace(restoredWorkspace);
 
     return restoredWorkspace;
   }
@@ -376,7 +380,7 @@ export class WorkspaceRegistry {
       baseSha: workspace.worktree?.baseSha,
       managed: workspace.worktree?.managed,
     });
-    this.workspaces.set(workspace.id, workspace);
+    this.rememberWorkspace(workspace);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
 
@@ -387,6 +391,18 @@ export class WorkspaceRegistry {
       workspaceReused: false,
       includeBootstrapContext: true,
     };
+  }
+
+  private rememberWorkspace(workspace: Workspace): void {
+    this.workspaces.delete(workspace.id);
+    this.workspaces.set(workspace.id, workspace);
+
+    if (!this.store) return;
+    while (this.workspaces.size > MAX_CACHED_WORKSPACES) {
+      const oldestWorkspaceId = this.workspaces.keys().next().value as string | undefined;
+      if (!oldestWorkspaceId) break;
+      this.workspaces.delete(oldestWorkspaceId);
+    }
   }
 
   private loadSkillsForWorkspace(root: string): Pick<Workspace, "skills" | "skillDiagnostics"> {

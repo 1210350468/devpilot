@@ -171,6 +171,15 @@ legacy Streamable HTTP session
 
 验收覆盖 modern `server/discover`、`tools/list`、真实 `tools/call`、legacy `initialize` + session ID，以及完整 `npm test/typecheck/build`。
 
+### 上游同步稳定性约束
+
+后续同步继续采用能力级吸收，而不是整批 merge：
+
+- MCP `serverInfo.version` 从 `package.json` 动态读取，避免客户端看到过期的硬编码版本；
+- WorkspaceRegistry 的内存上下文缓存限制为最近使用的 32 个 workspace，超出后按 LRU 驱逐，持久化 session 仍可按需恢复；
+- 上游某些提交把 cache 优化与 Skill 读取权限放宽绑在一起，DevPilot 只吸收 cache 部分，继续要求先加载已广告的 `SKILL.md` 后才能访问对应 Skill 目录；
+- 与现有 8-tool surface、Secure Tunnel、Request Inspector 无直接收益的 process/tool-surface 重构继续保持 HOLD。
+
 ## 请求观察器与对话隔离
 
 请求观察器记录最近的 MCP/HTTP 请求，包括：

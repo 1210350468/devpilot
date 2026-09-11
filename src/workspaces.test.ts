@@ -129,6 +129,31 @@ test("persisted checkout and worktree sessions restore after recreating the regi
   }
 });
 
+test("workspace cache keeps only 32 recently used contexts when persistence is enabled", async (t) => {
+  const context = await fixture(t);
+  const stateDir = join(context.root, ".bounded-state");
+  const store = new SqliteWorkspaceStore(stateDir);
+  try {
+    const registry = new WorkspaceRegistry(context.config, store);
+
+    const opened = [];
+    for (let index = 0; index < 32; index += 1) {
+      opened.push(await registry.openWorkspace(context.root));
+    }
+
+    const firstWorkspace = opened[0]!.workspace;
+    const secondWorkspace = opened[1]!.workspace;
+    assert.equal(registry.getWorkspace(firstWorkspace.id), firstWorkspace);
+
+    await registry.openWorkspace(context.root);
+
+    assert.equal(registry.getWorkspace(firstWorkspace.id), firstWorkspace);
+    assert.notEqual(registry.getWorkspace(secondWorkspace.id), secondWorkspace);
+  } finally {
+    store.close();
+  }
+});
+
 test("workspace paths outside the allowed roots are rejected", async (t) => {
   const context = await fixture(t);
 
