@@ -37,8 +37,11 @@ function checkLocalAgentProviderAvailability(
       return providerEnv.CLAUDE_COMMAND
         ? commandAvailability(provider, providerEnv.CLAUDE_COMMAND, providerEnv)
         : packageAvailability(provider, "@anthropic-ai/claude-agent-sdk");
-    case "opencode":
-      return packageAvailability(provider, "@opencode-ai/sdk/v2");
+    case "opencode": {
+      const sdk = packageAvailability(provider, "@opencode-ai/sdk/v2");
+      if (!sdk.available) return sdk;
+      return commandAvailability(provider, "opencode", providerEnv);
+    }
     case "pi":
       return packageAvailability(provider, "@earendil-works/pi-coding-agent");
     case "cursor":

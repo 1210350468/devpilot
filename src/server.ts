@@ -42,6 +42,7 @@ import {
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
+import { previewJson, type RequestObserver } from "./request-observer.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
@@ -793,8 +794,12 @@ function withTrackedToolHandlers(
   };
 }
 
+export type ServerAuthMode = "oauth" | "secure-tunnel";
+
 export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
+  authMode?: ServerAuthMode;
+  requestObserver?: RequestObserver;
 }
 
 export function createServer(
@@ -803,6 +808,8 @@ export function createServer(
 ): RunningServer {
   const incomingArtifactAdapters = options.incomingArtifactAdapters
     ?? [createOpenAIIncomingArtifactAdapter()];
+  const authMode = options.authMode ?? "oauth";
+  const secureTunnelAuth = authMode === "secure-tunnel";
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -812,12 +819,16 @@ export function createServer(
   });
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
-  const bearerAuth = requireBearerAuth({
-    verifier: oauthProvider,
-    requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
-  });
+  const oauthProvider = secureTunnelAuth
+    ? undefined
+    : new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const bearerAuth = oauthProvider
+    ? requireBearerAuth({
+        verifier: oauthProvider,
+        requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
+        resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+      })
+    : undefined;
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
@@ -873,9 +884,40 @@ export function createServer(
     const requestId = randomUUID();
     const startedAt = performance.now();
     res.locals.requestId = requestId;
+    const body = req.body as {
+      method?: unknown;
+      _meta?: unknown;
+      params?: { name?: unknown; arguments?: unknown; _meta?: unknown };
+    } | undefined;
+    const mcpMethod = typeof body?.method === "string" ? body.method : undefined;
+    const toolName = mcpMethod === "tools/call" && typeof body?.params?.name === "string"
+      ? body.params.name
+      : undefined;
+    const mcpSessionId = req.header("mcp-session-id")?.trim() || undefined;
+    const conversationScopeId = conversationScopeIdFromRequestMeta(body?.params?._meta ?? body?._meta);
+
+    options.requestObserver?.start({
+      id: requestId,
+      startedAt: new Date().toISOString(),
+      method: req.method,
+      path: requestPath(req),
+      host: req.header("host"),
+      userAgent: req.header("user-agent"),
+      mcpMethod,
+      toolName,
+      paramsPreview: previewJson(body?.params?.arguments ?? body?.params),
+      conversationScopeId,
+      mcpSessionId,
+    });
 
     res.on("finish", () => {
       const path = requestPath(req);
+      const durationMs = Math.round(performance.now() - startedAt);
+      options.requestObserver?.finish(requestId, {
+        completedAt: new Date().toISOString(),
+        status: res.statusCode,
+        durationMs,
+      });
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
@@ -884,7 +926,11 @@ export function createServer(
         method: req.method,
         path,
         status: res.statusCode,
-        durationMs: Math.round(performance.now() - startedAt),
+        durationMs,
+        ...(mcpMethod ? { mcpMethod } : {}),
+        ...(toolName ? { toolName } : {}),
+        ...(mcpSessionId ? { mcpSessionIdPresent: true } : {}),
+        ...(conversationScopeId ? { conversationScopePresent: true } : {}),
         ...requestLogFields(req, config),
       });
     });
@@ -892,16 +938,27 @@ export function createServer(
     next();
   });
 
-  app.use(
-    mcpAuthRouter({
-      provider: oauthProvider,
-      issuerUrl: new URL(config.publicBaseUrl),
-      baseUrl: new URL(config.publicBaseUrl),
-      resourceServerUrl,
-      scopesSupported: config.oauth.scopes,
-      resourceName: "DevSpace",
-    }),
-  );
+  if (oauthProvider) {
+    app.use(
+      mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: new URL(config.publicBaseUrl),
+        baseUrl: new URL(config.publicBaseUrl),
+        resourceServerUrl,
+        scopesSupported: config.oauth.scopes,
+        resourceName: "DevSpace",
+      }),
+    );
+  } else {
+    for (const path of [
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource",
+    ]) {
+      app.get(path, (_req, res) => {
+        res.status(404).end();
+      });
+    }
+  }
 
   app.options("/mcp-app-assets/{*asset}", (_req, res) => {
     setAssetHeaders(res);
@@ -925,24 +982,26 @@ export function createServer(
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
 
-    await new Promise<void>((resolve, reject) => {
-      bearerAuth(req, res, (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
+    if (bearerAuth) {
+      await new Promise<void>((resolve, reject) => {
+        bearerAuth(req, res, (error?: unknown) => {
+          if (error) reject(error);
+          else resolve();
+        });
       });
-    });
-    if (res.headersSent) return;
+      if (res.headersSent) return;
 
-    if (!req.auth?.resource || !oauthProvider.isResourceAllowed(req.auth.resource)) {
-      logEvent(config.logging, "warn", "auth_denied", {
-        requestId,
-        method: req.method,
-        path: requestPath(req),
-        reason: "invalid_oauth_resource",
-        ...requestLogFields(req, config),
-      });
-      sendJsonRpcError(res, 401, -32001, "Unauthorized");
-      return;
+      if (!req.auth?.resource || !oauthProvider?.isResourceAllowed(req.auth.resource)) {
+        logEvent(config.logging, "warn", "auth_denied", {
+          requestId,
+          method: req.method,
+          path: requestPath(req),
+          reason: "invalid_oauth_resource",
+          ...requestLogFields(req, config),
+        });
+        sendJsonRpcError(res, 401, -32001, "Unauthorized");
+        return;
+      }
     }
 
     logEvent(config.logging, "debug", "mcp_request", {
@@ -979,7 +1038,7 @@ export function createServer(
         }
         await toolActivities.waitForIdle();
         processSessions.shutdown();
-        oauthProvider.close();
+        oauthProvider?.close();
         workspaceStore.close?.();
       })();
       return closePromise;

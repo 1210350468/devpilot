@@ -4,3 +4,6 @@ releases/
 .devspace-dev/
 .env
 *.log
+.devpilot-config/
+.devpilot-runtime/
+tools/tunnel-client.exe

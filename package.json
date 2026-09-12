@@ -14,7 +14,8 @@
   "packageManager": "pnpm@11.25.0",
   "bin": {
     "devspace": "bin/devspace.js",
-    "devspace-agentd": "bin/devspace-agentd.js"
+    "devspace-agentd": "bin/devspace-agentd.js",
+    "devpilot": "dist/devpilot-cli.js"
   },
   "files": [
     "bin",
