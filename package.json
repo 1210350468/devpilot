@@ -1,10 +1,11 @@
 {
   "name": "@waishnav/devspace",
   "version": "1.0.8",
-  "description": "Expose a secure local coding workspace through an MCP server.",
+  "private": true,
+  "description": "DevPilot: an upstream-first DevSpace overlay with a local Control Center and OpenAI Secure MCP Tunnel integration.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Waishnav/devspace.git"
+    "url": "git+https://github.com/1210350468/devpilot.git"
   },
   "type": "module",
   "main": "dist/server.js",
@@ -27,9 +28,6 @@
     "skills",
     "README.md"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "pnpm clean && pnpm build:app && tsc -p tsconfig.build.json",

@@ -16,11 +16,10 @@ $StdoutPath = Join-Path $RuntimeDir "devpilot.out.log"
 $StderrPath = Join-Path $RuntimeDir "devpilot.err.log"
 $ControlUrl = "http://127.0.0.1:$ControlPort"
 $PanelUrl = "$ControlUrl/devpilot/"
-$SourceCandidate = "E:\coding\DevPilot_update_candidate"
-$SourceTunnelConfig = Join-Path $SourceCandidate ".devpilot-config\openai-tunnel.json"
 $LocalTunnelConfig = Join-Path $ConfigDir "openai-tunnel.json"
-$SourceTunnelClient = Join-Path $SourceCandidate "tools\tunnel-client.exe"
 $LocalTunnelClient = Join-Path $ProjectRoot "tools\tunnel-client.exe"
+$ConfiguredTunnelConfig = $env:DEVPILOT_OPENAI_TUNNEL_CONFIG
+$ConfiguredTunnelClient = $env:DEVPILOT_OPENAI_TUNNEL_CLIENT
 
 New-Item -ItemType Directory -Force -Path $ConfigDir, $RuntimeDir, (Join-Path $ProjectRoot "tools") | Out-Null
 
@@ -57,11 +56,12 @@ if (Test-Port $ControlPort) {
 if (-not (Test-Path $ConfigPath)) {
   $stateDir = (Join-Path $RuntimeDir "state").Replace('\','\\')
   $worktreeRoot = (Join-Path $RuntimeDir "worktrees").Replace('\','\\')
+  $defaultRoot = (Split-Path -Parent $ProjectRoot).Replace('\','\\')
   $config = @"
 {
   "configVersion": 1,
   "server": { "host": "127.0.0.1", "port": $McpPort, "publicBaseUrl": "http://127.0.0.1:$McpPort", "allowedHosts": [], "trustProxy": false },
-  "workspaces": { "allowedRoots": ["E:\\coding", "E:\\minecraft"], "worktreeRoot": "$worktreeRoot" },
+  "workspaces": { "allowedRoots": ["$defaultRoot"], "worktreeRoot": "$worktreeRoot" },
   "storage": { "stateDir": "$stateDir" },
   "tools": { "mode": "codex" },
   "ui": { "enabled": true },
@@ -76,29 +76,20 @@ if (-not (Test-Path $ConfigPath)) {
 }
 if (-not (Test-Path $AuthPath)) { Write-Utf8NoBom $AuthPath ((@{ ownerToken = (New-OwnerToken) } | ConvertTo-Json) + [Environment]::NewLine) }
 
-$tunnelConfigPath = if (Test-Path $LocalTunnelConfig) { $LocalTunnelConfig } elseif (Test-Path $SourceTunnelConfig) { $SourceTunnelConfig } else { $null }
-if (-not $tunnelConfigPath) { throw "OpenAI tunnel config was not found. Expected $LocalTunnelConfig or $SourceTunnelConfig" }
+$tunnelConfigPath = if ($ConfiguredTunnelConfig -and (Test-Path $ConfiguredTunnelConfig)) { (Resolve-Path $ConfiguredTunnelConfig).Path } elseif (Test-Path $LocalTunnelConfig) { $LocalTunnelConfig } else { $null }
+if (-not $tunnelConfigPath) { throw "OpenAI tunnel config was not found. Put openai-tunnel.json in $ConfigDir or set DEVPILOT_OPENAI_TUNNEL_CONFIG." }
 $tunnel = Read-Json $tunnelConfigPath
 $TunnelId = [string]$tunnel.tunnelId
 $RuntimeKey = [string]$tunnel.runtimeApiKey
 $Proxy = [string]$tunnel.controlPlaneProxy
 if (-not $TunnelId -or -not $RuntimeKey) { throw "Tunnel config is missing tunnelId or runtimeApiKey." }
 
-# The same candidate Tunnel ID may still be owned by the older 376xx trial runtime.
-if (Test-Port 37680) {
-  try {
-    $old = Invoke-RestMethod -Uri "http://127.0.0.1:37680/devpilot/api/status" -TimeoutSec 1
-    if ($old.tunnel.tunnelId -eq $TunnelId -and $old.tunnel.state -eq "running") {
-      Invoke-RestMethod -Uri "http://127.0.0.1:37680/devpilot/api/tunnel/stop" -Method Post -Headers @{"x-devpilot-control"="1"} -TimeoutSec 10 | Out-Null
-      Start-Sleep -Milliseconds 500
-    }
-  } catch {}
-}
-
 $TunnelClient = $null
-foreach ($candidate in @($LocalTunnelClient, $SourceTunnelClient)) { if (Test-Path $candidate) { $TunnelClient = (Resolve-Path $candidate).Path; break } }
+foreach ($candidate in @($ConfiguredTunnelClient, $LocalTunnelClient)) {
+  if ($candidate -and (Test-Path $candidate)) { $TunnelClient = (Resolve-Path $candidate).Path; break }
+}
 if (-not $TunnelClient) { $command = Get-Command tunnel-client -ErrorAction SilentlyContinue; if ($command) { $TunnelClient = $command.Source } }
-if (-not $TunnelClient) { throw "tunnel-client.exe was not found." }
+if (-not $TunnelClient) { throw "tunnel-client was not found. Put tunnel-client.exe in tools, add tunnel-client to PATH, or set DEVPILOT_OPENAI_TUNNEL_CLIENT." }
 
 $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
 if (-not $pnpm) { $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue }

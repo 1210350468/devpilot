@@ -6,4 +6,8 @@ releases/
 *.log
 .devpilot-config/
 .devpilot-runtime/
+DevPilot-connection.txt
+NUL
+当前公网MCP地址.txt
+tools/cloudflared.exe
 tools/tunnel-client.exe
