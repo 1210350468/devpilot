@@ -7,8 +7,9 @@ DevPilot was rebuilt on top of the current `Waishnav/devspace` upstream architec
 ### Added
 
 - Full local Control Center with overview, runtime controls, request observer, conversation grouping, and editable settings.
+- Dual startup modes: Cloudflare Quick Tunnel and OpenAI Secure MCP Tunnel.
 - OpenAI Secure MCP Tunnel lifecycle integration and READY health reporting.
-- Windows one-click start/stop launchers.
+- Windows one-click start/stop launchers with an interactive mode selector and persistent success/error output.
 - High-fidelity image reads with original-resolution preservation when possible.
 - Oversized-image overview plus 2×2 bounded detail tiles.
 - Request diagnostics for MCP discovery and tool calls.
@@ -19,6 +20,7 @@ DevPilot was rebuilt on top of the current `Waishnav/devspace` upstream architec
 - Long-running commands use upstream process sessions through `exec_command` / `write_stdin`.
 - DevPilot is now maintained as a thin overlay over upstream DevSpace rather than a parallel MCP implementation.
 - One-click startup no longer contains machine-specific absolute paths.
+- The launcher now waits for real MCP + Tunnel readiness, prints the exact connection method for ChatGPT, copies the URL/Tunnel ID to the clipboard, and can switch cleanly between both tunnel modes.
 - GitHub source distribution is intentionally private-from-npm (`package.json` keeps the upstream internal package name for compatibility but sets `private: true`).
 
 ### Fixed
@@ -26,6 +28,8 @@ DevPilot was rebuilt on top of the current `Waishnav/devspace` upstream architec
 - OpenCode availability no longer reports a false positive when its executable is missing.
 - Large image reads no longer fall into the old text-size truncation behavior.
 - Control Center settings reload on restart instead of reusing stale in-memory configuration.
+- Restored Cloudflare Quick Tunnel management in the upstream-first Supervisor and surfaced the active public MCP URL in Control Center.
+- Windows PowerShell 5.1 launcher encoding is UTF-8 BOM-safe, preventing non-ASCII status text from breaking script parsing.
 - Production dependency audit was reduced to 0 known vulnerabilities through patched transitive dependency resolutions.
 
 ### Verification

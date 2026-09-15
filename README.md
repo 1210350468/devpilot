@@ -10,8 +10,9 @@ DevPilot 是基于 [Waishnav/devspace](https://github.com/Waishnav/devspace) 的
 
 - 本地 **Control Center**：总览、启动/重启/停止、Provider 状态、配置、最近事件。
 - **ChatGPT 请求观察器**：按 `openai/session` 分组查看 `server/discover`、`tools/list`、`tools/call`、工具名、状态和耗时。
-- **OpenAI Secure MCP Tunnel** 生命周期管理与 READY 健康检查。
-- Windows 一键启动/关闭入口，启动后自动打开 Control Center。
+- **双 Tunnel 模式**：Cloudflare Quick Tunnel 与 OpenAI Secure MCP Tunnel，启动前可交互选择。
+- OpenAI Secure MCP Tunnel 生命周期管理与 READY 健康检查。
+- Windows 一键启动/关闭入口，启动后会等待真实 READY、打印连接信息并自动打开 Control Center。
 - 高保真图片读取：普通图片尽量保持原分辨率；超大图片自动返回总览 + 2×2 细节切片，适合大型 UI、Minecraft/GTNH、图纸等场景。
 - 少量 Windows/provider 可用性修正。
 
@@ -56,9 +57,11 @@ pnpm build
 
 > 本仓库当前只发布 GitHub 源码，不发布或覆盖上游的 npm 包。`package.json` 保留上游内部包名以减少兼容风险，并设置了 `private: true` 防止误发布。
 
-### 2. 配置 OpenAI Secure MCP Tunnel（可选 DevPilot 一键模式）
+### 2. 配置 OpenAI Secure MCP Tunnel（可选）
 
-一键脚本需要一个可用的 OpenAI Secure MCP Tunnel client，以及本地私有配置：
+如果使用 Cloudflare Quick Tunnel，不需要提前配置 OpenAI Tunnel；启动器会自动查找或下载官方 `cloudflared`。
+
+如果使用 OpenAI Secure MCP Tunnel，需要一个本地私有配置：
 
 ```text
 .devpilot-config/openai-tunnel.json
@@ -84,7 +87,7 @@ Tunnel client 可通过任一方式提供：
 
 也可以用 `DEVPILOT_OPENAI_TUNNEL_CONFIG` 指向其他本地 tunnel 配置文件。
 
-如果你没有 OpenAI Secure MCP Tunnel，仍可直接使用上游 DevSpace 的 OAuth + Cloudflare/ngrok/Tailscale 等公开 HTTPS Tunnel 工作流；DevPilot overlay 不会移除这些上游能力。
+如果你没有 OpenAI Secure MCP Tunnel，直接在启动菜单选择 **Cloudflare Quick Tunnel** 即可。启动器会等待真实公网 URL 生成后再判定 READY，并把完整 `/mcp` 地址复制到剪贴板。
 
 ### 3. 一键启动
 
@@ -94,14 +97,25 @@ Windows 双击：
 启动-DevPilot.cmd
 ```
 
-启动器会：
+启动器首先显示双模式菜单：
+
+```text
+  Cloudflare Quick Tunnel
+> OpenAI Secure MCP Tunnel
+```
+
+使用 `↑ / ↓` 选择，`Enter` 启动，`Esc` 取消。随后启动器会：
 
 1. 创建独立的 `.devpilot-config/` 与 `.devpilot-runtime/`；
 2. 默认将仓库所在父目录作为第一个 allowed root；
 3. 启动 upstream-first MCP server；
-4. 启动 OpenAI Secure MCP Tunnel；
-5. 等待 Tunnel READY；
-6. 自动打开 Control Center。
+4. 根据选择启动 Cloudflare Quick Tunnel 或 OpenAI Secure MCP Tunnel；
+5. 硬性等待 MCP + Tunnel 真正 READY，失败时保留窗口并显示错误；
+6. 打印 Control Center、本地 MCP、公网 MCP URL 或 Tunnel ID、工具面、日志路径和 ChatGPT 下一步操作；
+7. 把 Public MCP URL 或 Tunnel ID 复制到剪贴板；
+8. 自动打开 Control Center。
+
+成功窗口会停留到你按键关闭，不再一闪而过。只有看到 `DevPilot 已启动 · READY` 才表示 GPT 侧应该可用。
 
 默认测试端口：
 
@@ -121,7 +135,10 @@ Windows 双击：
 
 ## ChatGPT 怎么接
 
-创建一个新的 MCP/App connector 指向你的 Secure Tunnel。第一次从旧版 DevPilot 升级时，**建议新建一个 connector 名称**，因为 ChatGPT 可能缓存旧工具 schema。
+连接方式取决于启动模式：
+
+- **OpenAI Secure MCP Tunnel**：使用绑定该 Tunnel ID 的 MCP/App connector。第一次从旧版 DevPilot 升级时，建议新建一个 connector 名称，因为 ChatGPT 可能缓存旧工具 schema。
+- **Cloudflare Quick Tunnel**：把启动器打印并复制到剪贴板的 `https://...trycloudflare.com/mcp` 作为 Remote MCP URL。
 
 连接成功后，新对话应该发现：
 
@@ -197,7 +214,8 @@ npm pack --dry-run
 - typecheck：PASS
 - build：PASS
 - package dry-run：PASS
-- OpenAI Tunnel：READY
+- OpenAI Secure Tunnel：READY，`/readyz=200`
+- Cloudflare Quick Tunnel：READY，真实 `trycloudflare.com/mcp` URL 已验证
 - Control Center：HTTP 200
 
 ## 与上游 DevSpace 的关系

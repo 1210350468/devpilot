@@ -28,6 +28,8 @@ interface StatusResponse {
     startedAt?: string;
     error?: string;
     tunnelId?: string;
+    publicBaseUrl?: string;
+    publicMcpUrl?: string;
     healthUrl?: string;
     ready?: boolean;
   };
@@ -199,7 +201,7 @@ function App() {
           <div className="view-stack">
             <section className="metric-grid">
               <Metric label="MCP Server" value={status?.server.status === "online" ? "在线" : "离线"} detail={status?.server.localMcpUrl ?? "—"} />
-              <Metric label="Tunnel" value={status?.tunnel.ready ? "READY" : status?.tunnel.state ?? "—"} detail={status?.tunnel.tunnelId ?? "未配置"} />
+              <Metric label="Tunnel" value={status?.tunnel.ready ? "READY" : status?.tunnel.state ?? "—"} detail={status?.tunnel.tunnelId ?? status?.tunnel.publicMcpUrl ?? status?.tunnel.provider ?? "未配置"} />
               <Metric label="已识别对话" value={conversations.length} detail="按 openai/session 分组" />
               <Metric label="工具调用" value={toolCalls.length} detail={`保留请求 ${status?.requestObserver.retained ?? 0}`} />
             </section>
@@ -211,6 +213,8 @@ function App() {
                 <InfoRow label="MCP PID" value={String(status?.server.pid ?? "—")} />
                 <InfoRow label="本地 MCP" value={status?.server.localMcpUrl ?? "—"} mono />
                 <InfoRow label="Tunnel" value={status?.tunnel.ready ? "READY" : status?.tunnel.state ?? "—"} />
+                <InfoRow label="Tunnel 模式" value={status?.tunnel.provider ?? "—"} />
+                <InfoRow label="公网 MCP" value={status?.tunnel.publicMcpUrl ?? "—"} mono />
                 <InfoRow label="Tunnel Health" value={status?.tunnel.healthUrl ?? "—"} mono />
                 <div className="tool-list">{(status?.server.tools ?? []).map((tool) => <code key={tool}>{tool}</code>)}</div>
               </Panel>

@@ -13,19 +13,21 @@ import { RequestObserver } from "./request-observer.js";
 import { loadDevspaceFiles, setDevspaceConfigValues } from "./user-config.js";
 
 const OPENAI_TUNNEL_ID = /^tunnel_[0-9a-f]{32}$/;
+const CLOUDFLARE_QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi;
 const DEFAULT_CONTROL_HOST = "127.0.0.1";
 const DEFAULT_CONTROL_PORT = 47680;
 const DEFAULT_HEALTH_ADDR = "127.0.0.1:47683";
 const DEFAULT_START_TIMEOUT_MS = 30_000;
 const UI_BUILD_DIRECTORY = fileURLToPath(new URL("./ui/", import.meta.url));
 
-export type DevPilotTunnelProvider = "none" | "openai-secure";
+export type DevPilotTunnelProvider = "none" | "cloudflare-quick" | "openai-secure";
 export type ServiceState = "stopped" | "starting" | "running" | "stopping" | "error";
 
 export interface DevPilotSupervisorConfig {
   host: string;
   port: number;
   tunnelProvider: DevPilotTunnelProvider;
+  cloudflaredCommand: string;
   tunnelClientCommand: string;
   tunnelId?: string;
   tunnelApiKey?: string;
@@ -70,6 +72,8 @@ export interface DevPilotStatus {
     startedAt?: string;
     error?: string;
     tunnelId?: string;
+    publicBaseUrl?: string;
+    publicMcpUrl?: string;
     healthUrl?: string;
     ready?: boolean;
   };
@@ -87,6 +91,7 @@ export class DevPilotSupervisor {
   private serverHttp?: Server;
   private serverStatus: ServiceStatus = { state: "stopped" };
   private tunnelProcess?: ChildProcessWithoutNullStreams;
+  private tunnelPublicBaseUrl?: string;
   private tunnelStatus: ServiceStatus = { state: "stopped" };
   private controlHttp?: Server;
   private readonly events: EventEntry[] = [];
@@ -122,6 +127,11 @@ export class DevPilotSupervisor {
   }
 
   async startServices(): Promise<void> {
+    if (this.config.tunnelProvider === "cloudflare-quick") {
+      await this.startTunnel();
+      await this.startServer();
+      return;
+    }
     await this.startServer();
     if (this.config.tunnelProvider === "openai-secure") await this.startTunnel();
   }
@@ -142,7 +152,10 @@ export class DevPilotSupervisor {
     this.pushEvent("info", "Starting upstream DevSpace MCP server.");
     let running: ReturnType<typeof createServer> | undefined;
     try {
-      this.serverConfig = loadConfig();
+      const loadedConfig = loadConfig();
+      this.serverConfig = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
+        ? { ...loadedConfig, publicBaseUrl: this.tunnelPublicBaseUrl }
+        : loadedConfig;
       running = createServer(this.serverConfig, {
         authMode: this.config.tunnelProvider === "openai-secure" ? "secure-tunnel" : "oauth",
         requestObserver: this.requestObserver,
@@ -187,10 +200,32 @@ export class DevPilotSupervisor {
   async startTunnel(): Promise<void> {
     if (this.config.tunnelProvider === "none") return;
     if (["running", "starting"].includes(this.tunnelStatus.state)) return;
-    if (this.serverStatus.state !== "running") await this.startServer();
+    if (this.config.tunnelProvider === "openai-secure" && this.serverStatus.state !== "running") await this.startServer();
     this.tunnelStatus = { state: "starting" };
-    this.pushEvent("info", `Starting OpenAI Secure MCP Tunnel ${this.config.tunnelId}.`);
+    this.pushEvent("info", this.config.tunnelProvider === "cloudflare-quick"
+      ? "Starting Cloudflare Quick Tunnel."
+      : `Starting OpenAI Secure MCP Tunnel ${this.config.tunnelId}.`);
     try {
+      if (this.config.tunnelProvider === "cloudflare-quick") {
+        const launched = await spawnCloudflareQuickTunnel({
+          command: this.config.cloudflaredCommand,
+          localOrigin: localOrigin(this.serverConfig.host, this.serverConfig.port),
+          timeoutMs: DEFAULT_START_TIMEOUT_MS,
+        });
+        this.tunnelProcess = launched.child;
+        this.tunnelPublicBaseUrl = launched.publicBaseUrl;
+        this.tunnelStatus = { state: "running", pid: launched.child.pid, startedAt: new Date().toISOString() };
+        launched.child.once("exit", (code, signal) => {
+          if (this.tunnelProcess !== launched.child) return;
+          this.tunnelProcess = undefined;
+          this.tunnelPublicBaseUrl = undefined;
+          this.tunnelStatus = { state: "error", error: `cloudflared exited (${signal ?? code ?? "unknown"}).` };
+          this.pushEvent("error", this.tunnelStatus.error!);
+        });
+        this.pushEvent("info", `Cloudflare Quick Tunnel is READY at ${launched.publicBaseUrl}.`);
+        return;
+      }
+
       const child = await spawnOpenAiSecureTunnel({
         command: this.config.tunnelClientCommand,
         tunnelId: this.config.tunnelId!,
@@ -219,6 +254,7 @@ export class DevPilotSupervisor {
   async stopTunnel(): Promise<void> {
     const child = this.tunnelProcess;
     if (!child) {
+      this.tunnelPublicBaseUrl = undefined;
       this.tunnelStatus = { state: "stopped" };
       return;
     }
@@ -226,12 +262,22 @@ export class DevPilotSupervisor {
     this.tunnelProcess = undefined;
     terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
     await waitForChildExit(child, 5_000);
+    this.tunnelPublicBaseUrl = undefined;
     this.tunnelStatus = { state: "stopped" };
-    this.pushEvent("info", "OpenAI Secure MCP Tunnel stopped.");
+    this.pushEvent("info", `${this.config.tunnelProvider === "cloudflare-quick" ? "Cloudflare Quick Tunnel" : "OpenAI Secure MCP Tunnel"} stopped.`);
   }
 
   async status(): Promise<DevPilotStatus> {
-    const tunnelReady = this.config.tunnelProvider === "openai-secure" ? await isReady(this.healthUrl()) : undefined;
+    const tunnelReady = this.config.tunnelProvider === "openai-secure"
+      ? await isReady(this.healthUrl())
+      : this.config.tunnelProvider === "cloudflare-quick"
+        ? this.tunnelStatus.state === "running" && Boolean(this.tunnelPublicBaseUrl)
+        : undefined;
+    const publicMcpUrl = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
+      ? new URL("/mcp", this.tunnelPublicBaseUrl).toString()
+      : this.config.tunnelProvider === "openai-secure" && this.config.tunnelId
+        ? `tunnel:${this.config.tunnelId}`
+        : undefined;
     return {
       product: "DevPilot",
       architecture: "upstream-first",
@@ -255,6 +301,8 @@ export class DevPilotSupervisor {
         startedAt: this.tunnelStatus.startedAt,
         error: this.tunnelStatus.error,
         tunnelId: this.config.tunnelId,
+        publicBaseUrl: this.tunnelPublicBaseUrl,
+        publicMcpUrl,
         healthUrl: this.config.tunnelProvider === "openai-secure" ? this.healthUrl() : undefined,
         ready: tunnelReady,
       },
@@ -394,11 +442,14 @@ export class DevPilotSupervisor {
 
 export function loadDevPilotSupervisorConfig(env: NodeJS.ProcessEnv): DevPilotSupervisorConfig {
   const provider = (env.DEVPILOT_TUNNEL_PROVIDER?.trim() || "openai-secure") as DevPilotTunnelProvider;
-  if (provider !== "none" && provider !== "openai-secure") throw new Error(`Unsupported DEVPILOT_TUNNEL_PROVIDER: ${provider}`);
+  if (provider !== "none" && provider !== "cloudflare-quick" && provider !== "openai-secure") {
+    throw new Error(`Unsupported DEVPILOT_TUNNEL_PROVIDER: ${provider}`);
+  }
   return {
     host: env.DEVPILOT_CONTROL_HOST?.trim() || DEFAULT_CONTROL_HOST,
     port: positivePort(env.DEVPILOT_CONTROL_PORT, DEFAULT_CONTROL_PORT),
     tunnelProvider: provider,
+    cloudflaredCommand: env.DEVPILOT_CLOUDFLARED?.trim() || "cloudflared",
     tunnelClientCommand: env.DEVPILOT_OPENAI_TUNNEL_CLIENT?.trim() || "tunnel-client",
     tunnelId: env.DEVPILOT_OPENAI_TUNNEL_ID?.trim() || undefined,
     tunnelApiKey: env.DEVPILOT_OPENAI_TUNNEL_API_KEY?.trim() || env.CONTROL_PLANE_API_KEY?.trim() || undefined,
@@ -406,6 +457,52 @@ export function loadDevPilotSupervisorConfig(env: NodeJS.ProcessEnv): DevPilotSu
     tunnelHealthAddr: env.DEVPILOT_OPENAI_TUNNEL_HEALTH_ADDR?.trim() || DEFAULT_HEALTH_ADDR,
     autoStart: env.DEVPILOT_AUTOSTART === undefined ? true : parseBoolean(env.DEVPILOT_AUTOSTART),
   };
+}
+
+export function parseCloudflareQuickTunnelUrl(output: string): string | undefined {
+  const matches = output.match(CLOUDFLARE_QUICK_URL);
+  return matches?.[matches.length - 1]?.replace(/\/$/, "");
+}
+
+export async function spawnCloudflareQuickTunnel(input: { command: string; localOrigin: string; timeoutMs: number }): Promise<{ child: ChildProcessWithoutNullStreams; publicBaseUrl: string }> {
+  const child = spawn(input.command, ["tunnel", "--no-autoupdate", "--url", input.localOrigin], {
+    stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32", env: process.env,
+  });
+  child.stdin.end();
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
+      reject(new Error(`Cloudflare Quick Tunnel did not publish a URL within ${input.timeoutMs}ms.`));
+    }, input.timeoutMs);
+    timer.unref();
+    const inspect = (chunk: Buffer) => {
+      if (settled) return;
+      output = (output + chunk.toString("utf8")).slice(-32_000);
+      const publicBaseUrl = parseCloudflareQuickTunnelUrl(output);
+      if (!publicBaseUrl) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ child, publicBaseUrl });
+    };
+    child.stdout.on("data", inspect);
+    child.stderr.on("data", inspect);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`Unable to start cloudflared: ${error.message}`));
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`cloudflared exited before publishing a URL (${signal ?? code ?? "unknown"}).`));
+    });
+  });
 }
 
 export async function spawnOpenAiSecureTunnel(input: { command: string; tunnelId: string; apiKey: string; controlPlaneProxy?: string; mcpServerUrl: string; healthListenAddr: string; timeoutMs: number }): Promise<ChildProcessWithoutNullStreams> {
