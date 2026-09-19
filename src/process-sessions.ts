@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
-const DEFAULT_INTERACTIVE_YIELD_MS = 250;
+const DEFAULT_INTERACTIVE_YIELD_MS = 500;
 const DEFAULT_POLL_YIELD_MS = 5_000;
 export const MAX_PROCESS_YIELD_MS = 12_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;

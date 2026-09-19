@@ -15,6 +15,14 @@
 - Return an optional compact `resume` checkpoint from repeated `open_workspace` calls so long-running work can continue after process restart without rereading broad project context.
 - Bound aggregate `workspace_turn` step text with a fair configurable context budget (32k characters by default, 4k–96k supported) and explicit per-step truncation metadata.
 - Fix the Windows stop launcher to terminate the current `supervisorPid` written by runtime state while retaining the legacy `pid` fallback.
+- Preserve legacy DevPilot production settings during upstream-first migration, including the old `toolMode`, `authMode`, and `widgets` fields, while keeping unknown-key migration fail-closed.
+- Keep existing runtime ports during upgrade when the launcher is started without explicit port overrides, so an installed `7680 / 7681 / 7683` deployment does not silently move to new defaults.
+- Prevent first-run launcher defaults from overwriting an existing legacy `config.json`; the runtime now migrates it atomically and retains `config.json.v1.0.bak` for rollback.
+- Localize legacy deployments that did not specify `stateDir` / `worktreeRoot` into the DevPilot project's `.devpilot-runtime` tree before server startup, avoiding accidental reuse of an unrelated global DevSpace SQLite database.
+- Run the legacy migration preflight through Node stdin instead of PowerShell `--eval`, avoiding Windows PowerShell 5.1 quote corruption.
+- Validate the production-like promotion path in an isolated detached worktree: legacy config copy → first install/build → atomic config migration → SQLite migrations 1–9 → local MCP + Cloudflare Quick Tunnel READY, with the real production `768x` processes unchanged.
+- Validate rollback independently by restoring `config.json.v1.0.bak` as legacy `config.json` and confirming the production baseline code can read the original six allowed roots and legacy runtime modes without understanding the new SQLite state.
+- Increase the default interactive process grace window from 250 ms to 500 ms after real Windows stress testing showed that cold child-process startup could otherwise return a nearly-finished session as still running and force an avoidable follow-up poll; completed processes still return immediately.
 
 ## 2026-09-15 — Upstream-first DevPilot
 
