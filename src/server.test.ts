@@ -112,6 +112,8 @@ test("workspace_turn batches reads and commands in one Codex tool call", async (
   assert.equal(steps.length, 2);
   assert.deepEqual(steps.map((step) => step.kind), ["read", "exec"]);
   assert.equal(steps.every((step) => step.ok === true), true);
+  assert.match(String(steps[0]?.result ?? ""), /batch-read/);
+  assert.match(String(steps[1]?.result ?? ""), /batch-command/);
   const rendered = JSON.stringify(response.content);
   assert.match(rendered, /batch-read/);
   assert.match(rendered, /batch-command/);

@@ -4,6 +4,7 @@
 
 - Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.
+- Mirror each batched step's model-readable output into structured content so ChatGPT hosts receive the actual file or command results.
 - Keep `apply_patch` and `show_changes` separate so mutation and review boundaries remain explicit.
 - Develop and validate the feature in an isolated worktree before any promotion to `main`.
 

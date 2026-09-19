@@ -77,6 +77,7 @@ type WorkspaceTurnStep = {
   kind: WorkspaceTurnOperation["kind"];
   ok: boolean;
   label: string;
+  result?: string;
   session_id?: number;
   running?: boolean;
   exit_code?: number;
@@ -389,7 +390,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
     {
       title: "Workspace turn",
       description:
-        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Use this to combine independent reads, short commands, and process polls after open_workspace. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
+        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Use this to combine independent reads, short commands, and process polls after open_workspace. Each step returns its model-readable result. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
         operations: z
@@ -411,6 +412,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           kind: z.enum(["read", "exec", "poll"]),
           ok: z.boolean(),
           label: z.string(),
+          result: z.string().optional(),
           session_id: z.number().int().optional(),
           running: z.boolean().optional(),
           exit_code: z.number().int().optional(),
@@ -450,6 +452,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
             kind: operation.kind,
             ok: !response.isError,
             label: operation.path,
+            result: contentText(response.content),
           };
           steps.push(step);
           if (response.isError && stopOnError) break;
@@ -527,6 +530,7 @@ function workspaceTurnProcessStep(
     kind,
     ok,
     label,
+    result: processResult(snapshot),
     session_id: snapshot.sessionId,
     running: snapshot.running,
     exit_code: snapshot.exitCode,

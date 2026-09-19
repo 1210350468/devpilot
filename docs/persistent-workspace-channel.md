@@ -31,6 +31,8 @@ It accepts up to eight ordered operations:
 
 The tool is deliberately not an autonomous agent. It executes only operations explicitly supplied by the host. File edits remain in `apply_patch`, and aggregate review remains in `show_changes`, preserving the existing review and safety boundaries.
 
+Each returned step also includes its model-readable `result`, so hosts that prioritize structured content still receive the file or command output produced by the batch.
+
 Recommended interaction pattern:
 
 ```text
