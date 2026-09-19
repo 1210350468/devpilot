@@ -46,6 +46,10 @@ function testDevPilotStartLauncherPreservesLegacyConfig(): void {
     script,
     /if \(-not \(Test-Path \$ConfigPath\) -and -not \(Test-Path \$LegacyConfigPath\)\)/,
   );
+  assert.match(script, /\$previousRuntime\s*=\s*Get-JsonFile \$RuntimePath/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("McpPort"\)/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("ControlPort"\)/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("TunnelHealthPort"\)/);
 }
 
 function testLinkedCheckoutReadsCurrentConfig(): void {

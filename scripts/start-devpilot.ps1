@@ -37,6 +37,36 @@ function Get-JsonFile([string]$Path) {
   try { return Get-Content -Raw -Encoding UTF8 $Path | ConvertFrom-Json } catch { return $null }
 }
 
+function Get-ValidPort($Value) {
+  if ($null -eq $Value) { return $null }
+  try {
+    $port = [int]$Value
+    if ($port -ge 1 -and $port -le 65535) { return $port }
+  } catch {}
+  return $null
+}
+
+$previousRuntime = Get-JsonFile $RuntimePath
+if ($previousRuntime) {
+  if (-not $PSBoundParameters.ContainsKey("McpPort")) {
+    $previousMcpPort = Get-ValidPort $previousRuntime.mcpPort
+    if ($previousMcpPort) { $McpPort = $previousMcpPort }
+  }
+  if (-not $PSBoundParameters.ContainsKey("ControlPort")) {
+    $previousControlPort = Get-ValidPort $previousRuntime.controlPort
+    if ($previousControlPort) { $ControlPort = $previousControlPort }
+  }
+  if (-not $PSBoundParameters.ContainsKey("TunnelHealthPort")) {
+    $previousTunnelHealthPort = Get-ValidPort $previousRuntime.tunnelHealthPort
+    if ($previousTunnelHealthPort) { $TunnelHealthPort = $previousTunnelHealthPort }
+  }
+}
+
+$ControlUrl = "http://127.0.0.1:$ControlPort"
+$PanelUrl = "$ControlUrl/devpilot/"
+$TunnelHealthUrl = "http://127.0.0.1:$TunnelHealthPort"
+$LocalMcpUrl = "http://127.0.0.1:$McpPort/mcp"
+
 function New-OwnerToken {
   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
   try {
