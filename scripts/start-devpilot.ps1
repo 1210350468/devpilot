@@ -339,7 +339,32 @@ if (-not (Test-Path $ConfigPath) -and -not (Test-Path $LegacyConfigPath)) {
   Write-Utf8NoBom $ConfigPath ($config.Trim() + [Environment]::NewLine)
   Write-Host "[配置] 首次配置已创建。默认 allowed root: $(Split-Path $ProjectRoot -Parent)" -ForegroundColor Cyan
 } elseif (-not (Test-Path $ConfigPath) -and (Test-Path $LegacyConfigPath)) {
-  Write-Host "[配置] 检测到 legacy config.json，将由 DevSpace runtime 原子迁移并保留备份。" -ForegroundColor Cyan
+  Write-Host "[配置] 检测到 legacy config.json，正在执行原子迁移并保留备份..." -ForegroundColor Cyan
+  $legacyConfig = Get-JsonFile $LegacyConfigPath
+  if (-not $legacyConfig) { throw "无法解析 legacy 配置：$LegacyConfigPath" }
+  $legacyProperties = @($legacyConfig.PSObject.Properties.Name)
+  $env:DEVSPACE_CONFIG_DIR = $ConfigDir
+  $env:DEVPILOT_LEGACY_LOCAL_STATE = if ($legacyProperties -contains "stateDir") { "0" } else { "1" }
+  $env:DEVPILOT_LEGACY_LOCAL_WORKTREES = if ($legacyProperties -contains "worktreeRoot") { "0" } else { "1" }
+  $env:DEVPILOT_LEGACY_STATE_DIR = Join-Path $RuntimeDir "state"
+  $env:DEVPILOT_LEGACY_WORKTREE_ROOT = Join-Path $RuntimeDir "worktrees"
+  $migrationScript = @'
+import { loadDevspaceFiles, setDevspaceConfigValues } from "./dist/user-config.js";
+loadDevspaceFiles();
+const edits = [];
+if (process.env.DEVPILOT_LEGACY_LOCAL_STATE === "1") {
+  edits.push({ path: ["storage", "stateDir"], value: process.env.DEVPILOT_LEGACY_STATE_DIR });
+}
+if (process.env.DEVPILOT_LEGACY_LOCAL_WORKTREES === "1") {
+  edits.push({ path: ["workspaces", "worktreeRoot"], value: process.env.DEVPILOT_LEGACY_WORKTREE_ROOT });
+}
+if (edits.length > 0) setDevspaceConfigValues(edits);
+'@
+  Push-Location $ProjectRoot
+  try { & $node.Source --input-type=module --eval $migrationScript } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "legacy config.json 迁移失败。" }
+  Remove-Item Env:DEVPILOT_LEGACY_LOCAL_STATE, Env:DEVPILOT_LEGACY_LOCAL_WORKTREES, Env:DEVPILOT_LEGACY_STATE_DIR, Env:DEVPILOT_LEGACY_WORKTREE_ROOT -ErrorAction SilentlyContinue
+  Write-Host "[配置] legacy 配置迁移完成；缺省状态目录已固定到当前 DevPilot runtime。" -ForegroundColor Cyan
 }
 if (-not (Test-Path $AuthPath)) {
   Write-Utf8NoBom $AuthPath ((@{ ownerToken = (New-OwnerToken) } | ConvertTo-Json) + [Environment]::NewLine)
