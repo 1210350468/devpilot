@@ -27,12 +27,25 @@ for (const entrypoint of [
 testLinkedCheckoutReadsCurrentConfig();
 testMissingSourceRuntimeFailsClosed();
 testDevPilotStopLauncherUsesCurrentSupervisorPid();
+testDevPilotStartLauncherPreservesLegacyConfig();
 
 function testDevPilotStopLauncherUsesCurrentSupervisorPid(): void {
   const script = readFileSync(join(projectRoot, "scripts", "stop-devpilot.ps1"), "utf8");
   assert.match(script, /runtime\.supervisorPid/);
   assert.match(script, /runtime\.pid/);
   assert.match(script, /Stop-Process\s+-Id\s+\$supervisorPid/);
+}
+
+function testDevPilotStartLauncherPreservesLegacyConfig(): void {
+  const path = join(projectRoot, "scripts", "start-devpilot.ps1");
+  const bytes = readFileSync(path);
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  const script = bytes.toString("utf8");
+  assert.match(script, /\$LegacyConfigPath\s*=\s*Join-Path \$ConfigDir "config\.json"/);
+  assert.match(
+    script,
+    /if \(-not \(Test-Path \$ConfigPath\) -and -not \(Test-Path \$LegacyConfigPath\)\)/,
+  );
 }
 
 function testLinkedCheckoutReadsCurrentConfig(): void {

@@ -13,6 +13,7 @@ $ConfigDir = Join-Path $ProjectRoot ".devpilot-config"
 $RuntimeDir = Join-Path $ProjectRoot ".devpilot-runtime"
 $ToolsDir = Join-Path $ProjectRoot "tools"
 $ConfigPath = Join-Path $ConfigDir "config.jsonc"
+$LegacyConfigPath = Join-Path $ConfigDir "config.json"
 $AuthPath = Join-Path $ConfigDir "auth.json"
 $TunnelConfigPath = if ($env:DEVPILOT_OPENAI_TUNNEL_CONFIG) { $env:DEVPILOT_OPENAI_TUNNEL_CONFIG } else { Join-Path $ConfigDir "openai-tunnel.json" }
 $RuntimePath = Join-Path $RuntimeDir "runtime.json"
@@ -286,7 +287,7 @@ if (-not (Test-Path $distCli)) {
   if ($LASTEXITCODE -ne 0) { throw "pnpm build 失败。" }
 }
 
-if (-not (Test-Path $ConfigPath)) {
+if (-not (Test-Path $ConfigPath) -and -not (Test-Path $LegacyConfigPath)) {
   $defaultRoot = (Split-Path $ProjectRoot -Parent).Replace('\','\\')
   $stateDir = (Join-Path $RuntimeDir "state").Replace('\','\\')
   $worktreeRoot = (Join-Path $RuntimeDir "worktrees").Replace('\','\\')
@@ -307,6 +308,8 @@ if (-not (Test-Path $ConfigPath)) {
 "@
   Write-Utf8NoBom $ConfigPath ($config.Trim() + [Environment]::NewLine)
   Write-Host "[配置] 首次配置已创建。默认 allowed root: $(Split-Path $ProjectRoot -Parent)" -ForegroundColor Cyan
+} elseif (-not (Test-Path $ConfigPath) -and (Test-Path $LegacyConfigPath)) {
+  Write-Host "[配置] 检测到 legacy config.json，将由 DevSpace runtime 原子迁移并保留备份。" -ForegroundColor Cyan
 }
 if (-not (Test-Path $AuthPath)) {
   Write-Utf8NoBom $AuthPath ((@{ ownerToken = (New-OwnerToken) } | ConvertTo-Json) + [Environment]::NewLine)
