@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Persistent Workspace Channel v1
+
+- Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
+- Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.
+- Keep `apply_patch` and `show_changes` separate so mutation and review boundaries remain explicit.
+- Develop and validate the feature in an isolated worktree before any promotion to `main`.
+
 ## 2026-09-15 — Upstream-first DevPilot
 
 DevPilot was rebuilt on top of the current `Waishnav/devspace` upstream architecture instead of continuing the legacy eight-tool fork.

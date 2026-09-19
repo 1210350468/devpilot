@@ -32,7 +32,7 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "show_changes"],
+      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "workspace_turn", "show_changes"],
     },
   ];
 
@@ -82,6 +82,39 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
     assert.equal(yieldSchema?.maximum, 12_000);
     assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
   }
+});
+
+test("workspace_turn batches reads and commands in one Codex tool call", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  await writeFile(join(context.project, "batch.txt"), "batch-read\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [
+        { kind: "read", path: "batch.txt" },
+        { kind: "exec", cmd: "node -e \"console.log('batch-command')\"" },
+      ],
+    },
+  });
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.completed, 2);
+  assert.equal(structured.requested, 2);
+  assert.equal(structured.stopped_early, false);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  assert.equal(steps.length, 2);
+  assert.deepEqual(steps.map((step) => step.kind), ["read", "exec"]);
+  assert.equal(steps.every((step) => step.ok === true), true);
+  const rendered = JSON.stringify(response.content);
+  assert.match(rendered, /batch-read/);
+  assert.match(rendered, /batch-command/);
 });
 
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {

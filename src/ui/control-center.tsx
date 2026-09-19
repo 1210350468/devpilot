@@ -410,7 +410,7 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
     <Panel title="DevSpace 设置" subtitle="这里现在直接映射上游 v1 配置，不再保留旧 minimal/full/widgets 假选项。">
       <label className="form-row"><span>监听地址</span><input value={host} onChange={(event) => setHost(event.target.value)} /></label>
       <label className="form-row"><span>MCP 端口</span><input value={port} inputMode="numeric" onChange={(event) => setPort(event.target.value)} /></label>
-      <label className="form-row"><span>工具 Surface</span><select value={toolMode} onChange={(event) => setToolMode(event.target.value as "codex" | "claude")}><option value="codex">Codex：apply_patch + exec_command + write_stdin</option><option value="claude">Claude：write + edit + bash</option></select></label>
+      <label className="form-row"><span>工具 Surface</span><select value={toolMode} onChange={(event) => setToolMode(event.target.value as "codex" | "claude")}><option value="codex">Codex：apply_patch + exec_command + write_stdin + workspace_turn</option><option value="claude">Claude：write + edit + bash</option></select></label>
       <label className="form-row vertical"><span>允许目录</span><textarea rows={5} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
       <label className="form-row vertical"><span>Public Base URL</span><input value={publicBaseUrl} onChange={(event) => setPublicBaseUrl(event.target.value)} /></label>
       <Toggle label="MCP App UI" checked={uiEnabled} onChange={setUiEnabled} />

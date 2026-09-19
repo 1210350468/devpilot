@@ -27,6 +27,26 @@ test("a conversation reuses its checkout context", async (t) => {
   assert.deepEqual(second.workspace.agentProfiles, first.workspace.agentProfiles);
 });
 
+test("a reused checkout keeps cached bootstrap context until explicitly refreshed", async (t) => {
+  const { project, registry } = await fixture(t);
+  const agentsPath = join(project, "AGENTS.md");
+
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-cache" });
+  assert.match(first.agentsFiles.map((file) => file.content).join("\n"), /project instructions/);
+
+  await writeFile(agentsPath, "updated project instructions\n");
+  const cached = await registry.openWorkspace(project, { conversationScopeId: "chat-cache" });
+  assert.match(cached.agentsFiles.map((file) => file.content).join("\n"), /project instructions/);
+  assert.doesNotMatch(cached.agentsFiles.map((file) => file.content).join("\n"), /updated project instructions/);
+
+  const refreshed = await registry.openWorkspace(
+    { path: project, refreshContext: true },
+    { conversationScopeId: "chat-cache" },
+  );
+  assert.match(refreshed.agentsFiles.map((file) => file.content).join("\n"), /updated project instructions/);
+  assert.equal(refreshed.workspace.id, first.workspace.id);
+});
+
 test("different conversations receive separate checkout workspaces", async (t) => {
   const { project, registry } = await fixture(t);
 
@@ -160,7 +180,10 @@ test("a failed first context load does not consume bootstrap", async (t) => {
   await breakAgentsDirectory(agentsDir, backupDir);
   try {
     await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
+      () => registry.openWorkspace(
+        { path: project, refreshContext: true },
+        { conversationScopeId: "chat-1" },
+      ),
       /directory|ENOTDIR/i,
     );
   } finally {
@@ -179,7 +202,10 @@ test("a context-loading failure preserves a valid checkout binding", async (t) =
   await breakAgentsDirectory(agentsDir, backupDir);
   try {
     await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
+      () => registry.openWorkspace(
+        { path: project, refreshContext: true },
+        { conversationScopeId: "chat-1" },
+      ),
       /directory|ENOTDIR/i,
     );
   } finally {

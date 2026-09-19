@@ -405,6 +405,12 @@ function registerMcpSurface(
           .string()
           .optional()
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+        refresh_context: z
+          .boolean()
+          .optional()
+          .describe(
+            "Force a fresh reload of workspace instructions, skills, and nested instruction discovery. Defaults to false; normal continued work should reuse cached workspace context.",
+          ),
       },
       outputSchema: {
         workspace_id: z.string(),
@@ -439,7 +445,7 @@ function registerMcpSurface(
       ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, base_ref }, { _meta }) => {
+    async ({ path, mode, base_ref, refresh_context }, { _meta }) => {
       const startedAt = performance.now();
       const baseRef = base_ref;
       const {
@@ -449,7 +455,7 @@ function registerMcpSurface(
         workspaceReused,
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
-        { path, mode, baseRef },
+        { path, mode, baseRef, refreshContext: refresh_context },
         { conversationScopeId: conversationScopeIdFromRequestMeta(_meta) },
       );
       const review = await reviewCheckpoints.initializeWorkspace({

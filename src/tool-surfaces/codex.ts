@@ -1,5 +1,6 @@
 import * as z from "zod/v4";
 import { applyPatch } from "../apply-patch.js";
+import { readFileTool } from "../pi-tools.js";
 import {
   MAX_PROCESS_YIELD_MS,
   type ProcessSnapshot,
@@ -9,10 +10,12 @@ import {
   SHELL_TOOL_ANNOTATIONS,
   toolNames,
   workspaceIdDescription,
+  type ToolContent,
   type ToolRegistrationContext,
 } from "./types.js";
 import {
   contentText,
+  logToolCall,
   resultOutputSchema,
   runLoggedToolOperation,
   textBlock,
@@ -20,7 +23,7 @@ import {
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, or process polls are already known; keep individual tool calls for adaptive steps where one result determines the next action.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -35,7 +38,50 @@ export function registerCodexTools(context: ToolRegistrationContext): void {
 const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerApplyPatchTool,
   registerCodexProcessTools,
+  registerWorkspaceTurnTool,
 ];
+
+const workspaceTurnReadSchema = z.object({
+  kind: z.literal("read"),
+  path: z.string().describe("File path relative to the workspace, or an advertised skill path."),
+  offset: z.number().int().positive().optional(),
+  limit: z.number().int().positive().optional(),
+});
+
+const workspaceTurnExecSchema = z.object({
+  kind: z.literal("exec"),
+  cmd: z.string().min(1).describe("Shell command to execute."),
+  working_directory: z.string().optional(),
+  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional(),
+  max_output_tokens: z.number().int().positive().max(100_000).optional(),
+});
+
+const workspaceTurnPollSchema = z.object({
+  kind: z.literal("poll"),
+  session_id: z.number().int().positive(),
+  chars: z.string().optional(),
+  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional(),
+  max_output_tokens: z.number().int().positive().max(100_000).optional(),
+});
+
+const workspaceTurnOperationSchema = z.discriminatedUnion("kind", [
+  workspaceTurnReadSchema,
+  workspaceTurnExecSchema,
+  workspaceTurnPollSchema,
+]);
+
+type WorkspaceTurnOperation = z.infer<typeof workspaceTurnOperationSchema>;
+
+type WorkspaceTurnStep = {
+  index: number;
+  kind: WorkspaceTurnOperation["kind"];
+  ok: boolean;
+  label: string;
+  session_id?: number;
+  running?: boolean;
+  exit_code?: number;
+  output_truncated?: boolean;
+};
 
 function processResult(snapshot: ProcessSnapshot): string {
   const status = snapshot.running
@@ -333,4 +379,157 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       return processToolResponse(snapshot);
     },
   );
+}
+
+function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
+  const { server, config, workspaces, processSessions } = context;
+
+  server.registerTool(
+    "workspace_turn",
+    {
+      title: "Workspace turn",
+      description:
+        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Use this to combine independent reads, short commands, and process polls after open_workspace. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
+      inputSchema: {
+        workspace_id: z.string().describe(workspaceIdDescription),
+        operations: z
+          .array(workspaceTurnOperationSchema)
+          .min(1)
+          .max(8)
+          .describe("Ordered operations to execute. Maximum 8 operations per turn to keep results bounded."),
+        stop_on_error: z
+          .boolean()
+          .optional()
+          .describe("Stop after the first failed read or non-zero completed command. Defaults to true."),
+      },
+      outputSchema: resultOutputSchema({
+        completed: z.number().int().nonnegative(),
+        requested: z.number().int().positive(),
+        stopped_early: z.boolean(),
+        steps: z.array(z.object({
+          index: z.number().int().nonnegative(),
+          kind: z.enum(["read", "exec", "poll"]),
+          ok: z.boolean(),
+          label: z.string(),
+          session_id: z.number().int().optional(),
+          running: z.boolean().optional(),
+          exit_code: z.number().int().optional(),
+          output_truncated: z.boolean().optional(),
+        })),
+      }),
+      annotations: SHELL_TOOL_ANNOTATIONS,
+    },
+    async ({ workspace_id, operations, stop_on_error }) => {
+      const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      const stopOnError = stop_on_error ?? true;
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      const content: ToolContent[] = [];
+      const steps: WorkspaceTurnStep[] = [];
+
+      for (const [index, operation] of operations.entries()) {
+        content.push(textBlock(`--- workspace_turn ${index + 1}/${operations.length}: ${operation.kind} ---`));
+
+        if (operation.kind === "read") {
+          const readPath = workspaces.resolveReadPath(workspace, operation.path);
+          const response = await readFileTool(
+            {
+              path: readPath.absolutePath,
+              offset: operation.offset,
+              limit: operation.limit,
+            },
+            {
+              cwd: workspace.root,
+              root: workspace.root,
+              readRoots: readPath.readRoots,
+            },
+          );
+          content.push(...response.content);
+          const step: WorkspaceTurnStep = {
+            index,
+            kind: operation.kind,
+            ok: !response.isError,
+            label: operation.path,
+          };
+          steps.push(step);
+          if (response.isError && stopOnError) break;
+          continue;
+        }
+
+        if (operation.kind === "exec") {
+          const cwd = workspaces.resolveWorkingDirectory(workspace, operation.working_directory);
+          const snapshot = await processSessions.start({
+            workspaceId,
+            command: operation.cmd,
+            cwd,
+            workspaceRoot: workspace.root,
+            yieldTimeMs: operation.yield_time_ms,
+            maxOutputTokens: operation.max_output_tokens,
+          });
+          content.push(textBlock(processResult(snapshot)));
+          const ok = snapshot.running || snapshot.exitCode === 0;
+          steps.push(workspaceTurnProcessStep(index, operation.kind, operation.cmd, snapshot, ok));
+          if (!ok && stopOnError) break;
+          continue;
+        }
+
+        const snapshot = await processSessions.write({
+          workspaceId,
+          sessionId: operation.session_id,
+          chars: operation.chars,
+          yieldTimeMs: operation.yield_time_ms,
+          maxOutputTokens: operation.max_output_tokens,
+        });
+        content.push(textBlock(processResult(snapshot)));
+        const ok = snapshot.running || snapshot.exitCode === 0;
+        steps.push(workspaceTurnProcessStep(
+          index,
+          operation.kind,
+          `session ${operation.session_id}`,
+          snapshot,
+          ok,
+        ));
+        if (!ok && stopOnError) break;
+      }
+
+      const stoppedEarly = steps.length < operations.length;
+      const result = `Workspace turn completed ${steps.length}/${operations.length} operation(s)${stoppedEarly ? " and stopped early" : ""}.`;
+      logToolCall(config, {
+        tool: "workspace_turn",
+        workspaceId,
+        success: steps.every((step) => step.ok),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content: [textBlock(result), ...content],
+        structuredContent: {
+          result,
+          completed: steps.length,
+          requested: operations.length,
+          stopped_early: stoppedEarly,
+          steps,
+        },
+      };
+    },
+  );
+}
+
+function workspaceTurnProcessStep(
+  index: number,
+  kind: "exec" | "poll",
+  label: string,
+  snapshot: ProcessSnapshot,
+  ok: boolean,
+): WorkspaceTurnStep {
+  return {
+    index,
+    kind,
+    ok,
+    label,
+    session_id: snapshot.sessionId,
+    running: snapshot.running,
+    exit_code: snapshot.exitCode,
+    output_truncated: snapshot.outputTruncated,
+  };
 }

@@ -62,6 +62,12 @@ export interface Workspace {
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
   agentProfiles: LocalAgentProfile[];
+  bootstrapContext?: WorkspaceBootstrapContext;
+}
+
+interface WorkspaceBootstrapContext {
+  agentsFiles: LoadedAgentsFile[];
+  availableAgentsFiles: AvailableAgentsFile[];
 }
 
 export interface WorkspaceContext {
@@ -84,6 +90,7 @@ export interface OpenWorkspaceInput {
   path: string;
   mode?: WorkspaceMode;
   baseRef?: string;
+  refreshContext?: boolean;
 }
 
 export interface OpenWorkspaceOptions {
@@ -180,7 +187,10 @@ export class WorkspaceRegistry {
       const reusableWorkspace = await this.findReusableCheckoutWorkspace(binding);
 
       if (reusableWorkspace) {
-        const context = await this.reusedWorkspaceContext(reusableWorkspace);
+        const context = await this.reusedWorkspaceContext(
+          reusableWorkspace,
+          input.refreshContext ?? false,
+        );
         this.store?.touchConversationBinding(conversationScopeId, targetKey);
         return {
           ...context,
@@ -242,15 +252,18 @@ export class WorkspaceRegistry {
     return JSON.stringify(["checkout", projectKey, null]);
   }
 
-  private async reusedWorkspaceContext(workspace: Workspace): Promise<WorkspaceContext> {
-    workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
-    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+  private async reusedWorkspaceContext(
+    workspace: Workspace,
+    refreshContext: boolean,
+  ): Promise<WorkspaceContext> {
+    const bootstrapContext = refreshContext || !workspace.bootstrapContext
+      ? await this.refreshWorkspaceBootstrapContext(workspace)
+      : workspace.bootstrapContext;
 
     return {
       workspace,
-      agentsFiles,
-      availableAgentsFiles,
+      agentsFiles: bootstrapContext.agentsFiles,
+      availableAgentsFiles: bootstrapContext.availableAgentsFiles,
       workspaceReused: true,
       includeBootstrapContext: true,
     };
@@ -476,9 +489,10 @@ export class WorkspaceRegistry {
       baseSha: workspace.worktree?.baseSha,
       managed: workspace.worktree?.managed,
     });
-    this.rememberWorkspace(workspace);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    workspace.bootstrapContext = { agentsFiles, availableAgentsFiles };
+    this.rememberWorkspace(workspace);
 
     return {
       workspace,
@@ -507,6 +521,18 @@ export class WorkspaceRegistry {
       skills: result.skills,
       skillDiagnostics: result.diagnostics,
     };
+  }
+
+  private async refreshWorkspaceBootstrapContext(
+    workspace: Workspace,
+  ): Promise<WorkspaceBootstrapContext> {
+    Object.assign(workspace, this.loadSkillsForWorkspace(workspace.root));
+    workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
+    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
+    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const bootstrapContext = { agentsFiles, availableAgentsFiles };
+    workspace.bootstrapContext = bootstrapContext;
+    return bootstrapContext;
   }
 
   private assertWorkspaceRootAllowed(root: string, mode: WorkspaceMode, sourceRoot: string | undefined): string {

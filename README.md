@@ -27,9 +27,12 @@ show_changes
 apply_patch
 exec_command
 write_stdin
+workspace_turn
 ```
 
 `exec_command` 的长任务会返回 `session_id`，随后由 `write_stdin` 继续轮询或交互；不再维护旧版 `grep/glob/ls/bash` 等第二套 Codex 工具面。
+
+`workspace_turn` 用于已经能一次规划清楚的批量操作：最多把 8 个 `read`、短命令或进程轮询放进一次 MCP 往返。需要根据上一步结果临时决定下一步时，仍应使用独立工具调用。`open_workspace` 会缓存同一会话的 Bootstrap Context；只有显式传入 `refresh_context=true` 才强制重新加载 AGENTS、Skills 与嵌套指令发现。
 
 也可以在 Control Center 中切换到上游 `claude` surface：
 
@@ -149,6 +152,7 @@ show_changes
 apply_patch
 exec_command
 write_stdin
+workspace_turn
 ```
 
 示例：
