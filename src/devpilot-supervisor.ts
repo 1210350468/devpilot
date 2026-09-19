@@ -18,6 +18,7 @@ const DEFAULT_CONTROL_HOST = "127.0.0.1";
 const DEFAULT_CONTROL_PORT = 47680;
 const DEFAULT_HEALTH_ADDR = "127.0.0.1:47683";
 const DEFAULT_START_TIMEOUT_MS = 30_000;
+const DEFAULT_PUBLIC_PROBE_TIMEOUT_MS = 15_000;
 const UI_BUILD_DIRECTORY = fileURLToPath(new URL("./ui/", import.meta.url));
 
 export type DevPilotTunnelProvider = "none" | "cloudflare-quick" | "openai-secure";
@@ -92,6 +93,7 @@ export class DevPilotSupervisor {
   private serverStatus: ServiceStatus = { state: "stopped" };
   private tunnelProcess?: ChildProcessWithoutNullStreams;
   private tunnelPublicBaseUrl?: string;
+  private cloudflarePublicReady = false;
   private tunnelStatus: ServiceStatus = { state: "stopped" };
   private controlHttp?: Server;
   private readonly events: EventEntry[] = [];
@@ -130,6 +132,7 @@ export class DevPilotSupervisor {
     if (this.config.tunnelProvider === "cloudflare-quick") {
       await this.startTunnel();
       await this.startServer();
+      await this.verifyCloudflarePublicReady();
       return;
     }
     await this.startServer();
@@ -154,7 +157,14 @@ export class DevPilotSupervisor {
     try {
       const loadedConfig = loadConfig();
       this.serverConfig = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
-        ? { ...loadedConfig, publicBaseUrl: this.tunnelPublicBaseUrl }
+        ? {
+            ...loadedConfig,
+            publicBaseUrl: this.tunnelPublicBaseUrl,
+            allowedHosts: Array.from(new Set([
+              ...loadedConfig.allowedHosts,
+              new URL(this.tunnelPublicBaseUrl).hostname,
+            ])),
+          }
         : loadedConfig;
       running = createServer(this.serverConfig, {
         authMode: this.config.tunnelProvider === "openai-secure" ? "secure-tunnel" : "oauth",
@@ -207,6 +217,7 @@ export class DevPilotSupervisor {
       : `Starting OpenAI Secure MCP Tunnel ${this.config.tunnelId}.`);
     try {
       if (this.config.tunnelProvider === "cloudflare-quick") {
+        this.cloudflarePublicReady = false;
         const launched = await spawnCloudflareQuickTunnel({
           command: this.config.cloudflaredCommand,
           localOrigin: localOrigin(this.serverConfig.host, this.serverConfig.port),
@@ -219,10 +230,11 @@ export class DevPilotSupervisor {
           if (this.tunnelProcess !== launched.child) return;
           this.tunnelProcess = undefined;
           this.tunnelPublicBaseUrl = undefined;
+          this.cloudflarePublicReady = false;
           this.tunnelStatus = { state: "error", error: `cloudflared exited (${signal ?? code ?? "unknown"}).` };
           this.pushEvent("error", this.tunnelStatus.error!);
         });
-        this.pushEvent("info", `Cloudflare Quick Tunnel is READY at ${launched.publicBaseUrl}.`);
+        this.pushEvent("info", `Cloudflare Quick Tunnel connected at ${launched.publicBaseUrl}; waiting for public MCP readiness.`);
         return;
       }
 
@@ -255,6 +267,7 @@ export class DevPilotSupervisor {
     const child = this.tunnelProcess;
     if (!child) {
       this.tunnelPublicBaseUrl = undefined;
+      this.cloudflarePublicReady = false;
       this.tunnelStatus = { state: "stopped" };
       return;
     }
@@ -263,6 +276,7 @@ export class DevPilotSupervisor {
     terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
     await waitForChildExit(child, 5_000);
     this.tunnelPublicBaseUrl = undefined;
+    this.cloudflarePublicReady = false;
     this.tunnelStatus = { state: "stopped" };
     this.pushEvent("info", `${this.config.tunnelProvider === "cloudflare-quick" ? "Cloudflare Quick Tunnel" : "OpenAI Secure MCP Tunnel"} stopped.`);
   }
@@ -271,7 +285,7 @@ export class DevPilotSupervisor {
     const tunnelReady = this.config.tunnelProvider === "openai-secure"
       ? await isReady(this.healthUrl())
       : this.config.tunnelProvider === "cloudflare-quick"
-        ? this.tunnelStatus.state === "running" && Boolean(this.tunnelPublicBaseUrl)
+        ? this.tunnelStatus.state === "running" && this.cloudflarePublicReady
         : undefined;
     const publicMcpUrl = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
       ? new URL("/mcp", this.tunnelPublicBaseUrl).toString()
@@ -436,6 +450,51 @@ export class DevPilotSupervisor {
   private localMcpUrl(): string {
     return `${localOrigin(this.serverConfig.host, this.serverConfig.port)}/mcp`;
   }
+
+  private async verifyCloudflarePublicReady(): Promise<void> {
+    const publicBaseUrl = this.tunnelPublicBaseUrl;
+    if (this.config.tunnelProvider !== "cloudflare-quick" || !publicBaseUrl) return;
+    const publicHost = new URL(publicBaseUrl).host;
+    const metadataUrl = new URL(
+      "/.well-known/oauth-protected-resource/mcp",
+      localOrigin(this.serverConfig.host, this.serverConfig.port),
+    ).toString();
+    const expectedResource = new URL("/mcp", publicBaseUrl).toString();
+    const deadline = Date.now() + DEFAULT_PUBLIC_PROBE_TIMEOUT_MS;
+    let lastError = "public MCP metadata is not ready";
+
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(metadataUrl, {
+          headers: {
+            accept: "application/json",
+            host: publicHost,
+          },
+          signal: AbortSignal.timeout(3_000),
+        });
+        if (response.ok) {
+          const metadata = await response.json() as { resource?: unknown };
+          if (metadata.resource === expectedResource) {
+            this.cloudflarePublicReady = true;
+            this.pushEvent("info", `Cloudflare Quick Tunnel is READY at ${publicBaseUrl}.`);
+            return;
+          }
+          lastError = `public MCP metadata returned an unexpected resource: ${String(metadata.resource)}`;
+        } else {
+          lastError = `public MCP metadata returned HTTP ${response.status}`;
+        }
+      } catch (error) {
+        lastError = errorMessage(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    this.cloudflarePublicReady = false;
+    this.tunnelStatus = { ...this.tunnelStatus, state: "error", error: lastError };
+    this.pushEvent("error", `Cloudflare public MCP readiness failed: ${lastError}`);
+    throw new Error(`Cloudflare public MCP readiness failed: ${lastError}`);
+  }
+
   private controlUrl(): string { return localOrigin(this.config.host, this.config.port); }
   private healthUrl(): string { return openAiTunnelHealthBaseUrl(this.config.tunnelHealthAddr); }
 }
