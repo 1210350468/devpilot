@@ -440,6 +440,12 @@ function registerMcpSurface(
             reason: z.string(),
           }),
         ]),
+        resume: z.object({
+          status: z.enum(["active", "blocked", "done"]),
+          summary: z.string(),
+          next_step: z.string().optional(),
+          updated_at: z.string(),
+        }).optional(),
         instruction: z.string(),
       },
       ...workspaceAppDescriptorMeta(config),
@@ -462,6 +468,15 @@ function registerMcpSurface(
         workspaceId: workspace.id,
         root: workspace.root,
       });
+      const taskCheckpoint = workspaces.getTaskCheckpoint(workspace.id);
+      const resume = taskCheckpoint
+        ? {
+            status: taskCheckpoint.status,
+            summary: taskCheckpoint.summary,
+            next_step: taskCheckpoint.nextStep,
+            updated_at: taskCheckpoint.updatedAt,
+          }
+        : undefined;
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -505,11 +520,19 @@ function registerMcpSurface(
       const cardInstruction = config.skillsEnabled
         ? "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
         : "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file.";
+      const resumeInstruction = resume
+        ? [
+            `Resume checkpoint (${resume.status}, ${resume.updated_at}): ${resume.summary}`,
+            resume.next_step ? `Next checkpoint step: ${resume.next_step}` : undefined,
+            "Use workspace_turn delta before broadly rereading project files when current filesystem changes may matter.",
+          ].filter(Boolean).join("\n")
+        : undefined;
       const workspaceInstruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Continue with this workspace_id.",
             "Keep following the project instructions, nested instruction files, skills, agent profiles, and diagnostics already provided for this workspace.",
+            resumeInstruction,
           ].join("\n\n")
         : workspace.mode === "worktree"
           ? "Use this workspace_id for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
@@ -547,6 +570,9 @@ function registerMcpSurface(
             visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
+            resume
+              ? `Resume checkpoint [${resume.status}]: ${resume.summary}${resume.next_step ? `\nNext: ${resume.next_step}` : ""}`
+              : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
@@ -577,6 +603,7 @@ function registerMcpSurface(
             agentProviders: cardAgentProviders,
             agents: cardAgents,
             review,
+            taskCheckpoint: resume,
             instruction: cardInstruction,
             summary: {
               mode: workspace.mode,
@@ -604,6 +631,7 @@ function registerMcpSurface(
               }
             : undefined,
           review,
+          resume,
           ...(includeBootstrapContext
             ? {
                 agents_files: loadedAgentsFiles,

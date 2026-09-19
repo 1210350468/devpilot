@@ -172,6 +172,29 @@ test("checkout reuse survives a registry restart", async (t) => {
   assert.equal(restored.workspace.id, first.workspace.id);
 });
 
+test("task checkpoint state survives a registry restart with the conversation workspace", async (t) => {
+  const context = await fixture(t);
+  const first = await context.registry.openWorkspace(context.project, {
+    conversationScopeId: "chat-task-restart",
+  });
+  const saved = context.registry.setTaskCheckpoint(first.workspace.id, {
+    status: "active",
+    summary: "Finished the persistence slice.",
+    nextStep: "Resume with the delta slice.",
+    snapshotRef: "c".repeat(40),
+  });
+  context.closeStore(context.store);
+
+  const restoredStore = context.openStore();
+  const restoredRegistry = new WorkspaceRegistry(context.config, restoredStore);
+  const restored = await restoredRegistry.openWorkspace(context.project, {
+    conversationScopeId: "chat-task-restart",
+  });
+
+  assert.equal(restored.workspace.id, first.workspace.id);
+  assert.deepEqual(restoredRegistry.getTaskCheckpoint(restored.workspace.id), saved);
+});
+
 test("a failed first context load does not consume bootstrap", async (t) => {
   const { project, registry } = await fixture(t);
   const agentsDir = join(project, ".devspace", "agents");

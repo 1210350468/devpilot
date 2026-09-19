@@ -56,6 +56,24 @@ export const workspaceConversationBindings = sqliteTable(
   ],
 );
 
+export const workspaceTaskCheckpoints = sqliteTable(
+  "workspace_task_checkpoints",
+  {
+    workspaceSessionId: text("workspace_session_id")
+      .primaryKey()
+      .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("active"),
+    summary: text("summary").notNull(),
+    nextStep: text("next_step"),
+    snapshotRef: text("snapshot_ref"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("workspace_task_checkpoints_updated_idx").on(table.updatedAt),
+  ],
+);
+
 export const oauthClients = sqliteTable(
   "oauth_clients",
   {
@@ -123,5 +141,7 @@ export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
 export type NewLoadedAgentFileRow = typeof loadedAgentFiles.$inferInsert;
 export type WorkspaceConversationBindingRow = typeof workspaceConversationBindings.$inferSelect;
 export type NewWorkspaceConversationBindingRow = typeof workspaceConversationBindings.$inferInsert;
+export type WorkspaceTaskCheckpointRow = typeof workspaceTaskCheckpoints.$inferSelect;
+export type NewWorkspaceTaskCheckpointRow = typeof workspaceTaskCheckpoints.$inferInsert;
 export type LocalAgentSessionRow = typeof localAgentSessions.$inferSelect;
 export type NewLocalAgentSessionRow = typeof localAgentSessions.$inferInsert;

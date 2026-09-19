@@ -1,4 +1,4 @@
-# Persistent Workspace Channel v1
+# Persistent Workspace Channel v2 (experimental)
 
 This experimental DevPilot layer reduces repeated MCP round trips without moving orchestration away from the host model.
 
@@ -72,3 +72,41 @@ The isolated PWC connector was exercised through its own OpenAI Secure MCP Tunne
 - Final full suite after these changes: `141` tests / `135` pass / `0` fail / `6` platform-or-optional skips.
 
 These measurements support the v1 direction: keep ChatGPT as orchestrator, cache workspace bootstrap state, and batch only operations whose next steps are already known.
+
+## v2: task checkpoint, delta, and resume
+
+v2 extends the same host-orchestrated design without adding another top-level MCP tool.
+
+`workspace_turn` gains two bounded operations:
+
+- `checkpoint` persists a concise task `status`, `summary`, optional `next_step`, and a Git working-tree snapshot for the current conversation-scoped workspace session.
+- `delta` compares the current working tree with that checkpoint and returns only bounded changed paths plus aggregate addition/removal counts. It intentionally does not inject a full patch.
+
+Task state is stored in the existing DevSpace SQLite workspace database and is keyed by `workspace_session_id`. Because checkout workspaces are already conversation-scoped, separate ChatGPT conversations do not silently share task state. The checkpoint row is removed with its workspace session through the existing foreign-key lifecycle.
+
+When the same conversation reopens a persisted checkout, `open_workspace` returns a compact optional `resume` object:
+
+```text
+status
+summary
+next_step
+updated_at
+```
+
+The model-facing instruction recommends checking `workspace_turn` delta before broadly rereading project documents. This is the intended path for short prompts such as “continue”: recover the durable checkpoint, inspect only filesystem changes since it, then reason in the host.
+
+The checkpoint is deliberately not a hidden local plan or autonomous loop. It stores no transcript and executes no future action on its own. `summary` is capped at 1600 characters, `next_step` at 800 characters, and delta paths at 50 entries maximum. Adaptive decisions, edits, and final review remain host-controlled.
+
+## Context budget
+
+Batching must not trade fewer MCP calls for unbounded prompt growth. `workspace_turn` therefore applies a total model-readable step-result budget after execution. The default is `32,000` characters and callers may request `4,000..96,000` through `max_result_chars`.
+
+The budget is distributed fairly over the remaining steps rather than first-come-first-served. Short results return unused capacity to later steps; oversized results are trimmed to their current fair share and carry `result_truncated=true` plus an explicit instruction to use a focused `read` or `exec` when more detail is necessary. Checkpoint and delta metadata remain separately structured, so truncating a large file body does not erase task-state fields.
+
+### Host schema-cache compatibility
+
+The v2 experiment intentionally keeps the top-level Codex surface at seven tools. Real ChatGPT testing showed that changing only the nested `workspace_turn` operation union does not necessarily refresh an already-connected host's cached schema, even after the MCP server restarts and its own `tools/list` reports the new `checkpoint` and `delta` variants. A freshly discovered connector receives the server schema correctly. Treat this as a host-discovery compatibility boundary rather than a server-state failure; runtime validation therefore checks both the server's raw `tools/list` and the host-visible tool schema.
+
+### Runtime restart validation
+
+The OpenAI Secure Tunnel experiment also exposed a launcher lifecycle defect unrelated to task persistence: `runtime.json` stores `supervisorPid`, while the stop script still looked only for legacy `pid`. The script now prefers `supervisorPid` with `pid` as a compatibility fallback. A live stop test terminated the reported Supervisor PID and released all three experimental ports before restart. After restart, the same synthetic OpenAI conversation scope recovered the same workspace ID and task checkpoint, and `delta` still reported only the post-checkpoint documentation edit.

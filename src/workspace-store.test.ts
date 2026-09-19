@@ -67,6 +67,44 @@ test("pruned worktree sessions retain recovery state and can be reactivated", as
   assert.equal(store.getSession("ws_recoverable")?.recoveryKind, undefined);
 });
 
+test("task checkpoints persist per workspace session and update in place", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-workspace-store-test-"));
+  const store = new SqliteWorkspaceStore(stateDir);
+  t.after(async () => {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  store.createSession({
+    id: "ws_task",
+    root: "/tmp/task",
+    mode: "checkout",
+  });
+  const first = store.setTaskCheckpoint({
+    workspaceSessionId: "ws_task",
+    status: "active",
+    summary: "Implemented the first slice.",
+    nextStep: "Run focused tests.",
+    snapshotRef: "a".repeat(40),
+  });
+  assert.deepEqual(store.getTaskCheckpoint("ws_task"), first);
+
+  const second = store.setTaskCheckpoint({
+    workspaceSessionId: "ws_task",
+    status: "blocked",
+    summary: "Focused tests exposed a migration issue.",
+    nextStep: "Fix migration coverage.",
+    snapshotRef: "b".repeat(40),
+  });
+  assert.equal(second.createdAt, first.createdAt);
+  assert.equal(second.status, "blocked");
+  assert.equal(second.snapshotRef, "b".repeat(40));
+  assert.deepEqual(store.getTaskCheckpoint("ws_task"), second);
+
+  unwrap(store.deleteSession("ws_task"));
+  assert.equal(store.getTaskCheckpoint("ws_task"), undefined);
+});
+
 function unwrap<T, E>(result: BetterResult<T, E>): T {
   if (result.isErr()) throw result.error;
   return result.value;

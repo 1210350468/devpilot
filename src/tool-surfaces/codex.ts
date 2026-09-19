@@ -19,10 +19,14 @@ import {
   runLoggedToolOperation,
   textBlock,
 } from "./shared.js";
+import {
+  captureWorkspaceTaskSnapshot,
+  readWorkspaceDelta,
+} from "../workspace-delta.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, or process polls are already known; keep individual tool calls for adaptive steps where one result determines the next action.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -63,10 +67,39 @@ const workspaceTurnPollSchema = z.object({
   max_output_tokens: z.number().int().positive().max(100_000).optional(),
 });
 
+const workspaceTurnCheckpointSchema = z.object({
+  kind: z.literal("checkpoint"),
+  status: z.enum(["active", "blocked", "done"]).optional(),
+  summary: z
+    .string()
+    .min(1)
+    .max(1600)
+    .describe("Concise durable summary of the current task state. Do not copy the conversation transcript."),
+  next_step: z
+    .string()
+    .min(1)
+    .max(800)
+    .optional()
+    .describe("The next concrete host action if work should continue."),
+});
+
+const workspaceTurnDeltaSchema = z.object({
+  kind: z.literal("delta"),
+  max_files: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe("Maximum changed paths to return. Defaults to 20."),
+});
+
 const workspaceTurnOperationSchema = z.discriminatedUnion("kind", [
   workspaceTurnReadSchema,
   workspaceTurnExecSchema,
   workspaceTurnPollSchema,
+  workspaceTurnCheckpointSchema,
+  workspaceTurnDeltaSchema,
 ]);
 
 type WorkspaceTurnOperation = z.infer<typeof workspaceTurnOperationSchema>;
@@ -81,7 +114,21 @@ type WorkspaceTurnStep = {
   running?: boolean;
   exit_code?: number;
   output_truncated?: boolean;
+  checkpoint_status?: "active" | "blocked" | "done";
+  checkpoint_updated_at?: string;
+  changed_files?: string[];
+  changed_file_count?: number;
+  omitted_files?: number;
+  additions?: number;
+  removals?: number;
+  result_truncated?: boolean;
 };
+
+const DEFAULT_WORKSPACE_TURN_RESULT_CHARS = 32_000;
+const MIN_WORKSPACE_TURN_RESULT_CHARS = 4_000;
+const MAX_WORKSPACE_TURN_RESULT_CHARS = 96_000;
+const WORKSPACE_TURN_TRUNCATION_NOTICE =
+  "\n[workspace_turn result truncated to the turn context budget; use a focused read/exec if more detail is needed.]";
 
 function processResult(snapshot: ProcessSnapshot): string {
   const status = snapshot.running
@@ -389,7 +436,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
     {
       title: "Workspace turn",
       description:
-        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Use this to combine independent reads, short commands, and process polls after open_workspace. Each step returns its model-readable result. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
+        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Combine independent reads, short commands, process polls, task checkpoints, and checkpoint deltas after open_workspace. Each step returns its model-readable result. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
       inputSchema: {
         workspace_id: z.string().describe(workspaceIdDescription),
         operations: z
@@ -401,14 +448,26 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           .boolean()
           .optional()
           .describe("Stop after the first failed read or non-zero completed command. Defaults to true."),
+        max_result_chars: z
+          .number()
+          .int()
+          .min(MIN_WORKSPACE_TURN_RESULT_CHARS)
+          .max(MAX_WORKSPACE_TURN_RESULT_CHARS)
+          .optional()
+          .describe(
+            "Total character budget for model-readable step results. Defaults to 32000; unused budget is redistributed across later steps.",
+          ),
       },
       outputSchema: resultOutputSchema({
         completed: z.number().int().nonnegative(),
         requested: z.number().int().positive(),
         stopped_early: z.boolean(),
+        result_char_budget: z.number().int().positive(),
+        result_chars: z.number().int().nonnegative(),
+        truncated_results: z.number().int().nonnegative(),
         steps: z.array(z.object({
           index: z.number().int().nonnegative(),
-          kind: z.enum(["read", "exec", "poll"]),
+          kind: z.enum(["read", "exec", "poll", "checkpoint", "delta"]),
           ok: z.boolean(),
           label: z.string(),
           result: z.string().optional(),
@@ -416,11 +475,19 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           running: z.boolean().optional(),
           exit_code: z.number().int().optional(),
           output_truncated: z.boolean().optional(),
+          checkpoint_status: z.enum(["active", "blocked", "done"]).optional(),
+          checkpoint_updated_at: z.string().optional(),
+          changed_files: z.array(z.string()).optional(),
+          changed_file_count: z.number().int().nonnegative().optional(),
+          omitted_files: z.number().int().nonnegative().optional(),
+          additions: z.number().int().nonnegative().optional(),
+          removals: z.number().int().nonnegative().optional(),
+          result_truncated: z.boolean().optional(),
         })),
       }),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspace_id, operations, stop_on_error }) => {
+    async ({ workspace_id, operations, stop_on_error, max_result_chars }) => {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const stopOnError = stop_on_error ?? true;
@@ -470,6 +537,108 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           continue;
         }
 
+        if (operation.kind === "checkpoint") {
+          const snapshot = await captureWorkspaceTaskSnapshot({
+            workspaceId,
+            root: workspace.root,
+          });
+          const checkpoint = workspaces.setTaskCheckpoint(workspaceId, {
+            status: operation.status ?? "active",
+            summary: operation.summary,
+            nextStep: operation.next_step,
+            snapshotRef: snapshot.available ? snapshot.snapshotRef : undefined,
+          });
+          const snapshotNote = snapshot.available
+            ? "Git delta baseline captured."
+            : `Git delta unavailable: ${snapshot.reason}`;
+          steps.push({
+            index,
+            kind: operation.kind,
+            ok: true,
+            label: "task checkpoint",
+            result: [
+              `Task checkpoint saved as ${checkpoint.status}.`,
+              `Summary: ${checkpoint.summary}`,
+              checkpoint.nextStep ? `Next: ${checkpoint.nextStep}` : undefined,
+              snapshotNote,
+            ].filter(Boolean).join("\n"),
+            checkpoint_status: checkpoint.status,
+            checkpoint_updated_at: checkpoint.updatedAt,
+          });
+          continue;
+        }
+
+        if (operation.kind === "delta") {
+          const checkpoint = workspaces.getTaskCheckpoint(workspaceId);
+          if (!checkpoint) {
+            steps.push({
+              index,
+              kind: operation.kind,
+              ok: false,
+              label: "task delta",
+              result: "No task checkpoint exists for this workspace. Save a checkpoint before requesting a delta.",
+            });
+            if (stopOnError) break;
+            continue;
+          }
+          if (!checkpoint.snapshotRef) {
+            steps.push({
+              index,
+              kind: operation.kind,
+              ok: false,
+              label: "task delta",
+              result: "The current task checkpoint has no Git snapshot, so a workspace delta is unavailable. Save a fresh checkpoint in a Git workspace.",
+              checkpoint_status: checkpoint.status,
+              checkpoint_updated_at: checkpoint.updatedAt,
+            });
+            if (stopOnError) break;
+            continue;
+          }
+
+          try {
+            const delta = await readWorkspaceDelta({
+              workspaceId,
+              root: workspace.root,
+              snapshotRef: checkpoint.snapshotRef,
+              maxFiles: operation.max_files,
+            });
+            const fileSummary = delta.totalFiles === 0
+              ? "No workspace files changed since the checkpoint."
+              : `Changed ${delta.totalFiles} file(s) since the checkpoint (+${delta.additions}/-${delta.removals}): ${delta.changedFiles.join(", ")}${delta.omittedFiles > 0 ? ` (+${delta.omittedFiles} more)` : ""}.`;
+            steps.push({
+              index,
+              kind: operation.kind,
+              ok: true,
+              label: "task delta",
+              result: [
+                `Checkpoint ${checkpoint.status} from ${checkpoint.updatedAt}.`,
+                `Summary: ${checkpoint.summary}`,
+                checkpoint.nextStep ? `Next: ${checkpoint.nextStep}` : undefined,
+                fileSummary,
+              ].filter(Boolean).join("\n"),
+              checkpoint_status: checkpoint.status,
+              checkpoint_updated_at: checkpoint.updatedAt,
+              changed_files: delta.changedFiles,
+              changed_file_count: delta.totalFiles,
+              omitted_files: delta.omittedFiles,
+              additions: delta.additions,
+              removals: delta.removals,
+            });
+          } catch (error) {
+            steps.push({
+              index,
+              kind: operation.kind,
+              ok: false,
+              label: "task delta",
+              result: error instanceof Error ? error.message : String(error),
+              checkpoint_status: checkpoint.status,
+              checkpoint_updated_at: checkpoint.updatedAt,
+            });
+            if (stopOnError) break;
+          }
+          continue;
+        }
+
         const snapshot = await processSessions.write({
           workspaceId,
           sessionId: operation.session_id,
@@ -489,6 +658,8 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       }
 
       const stoppedEarly = steps.length < operations.length;
+      const resultCharBudget = max_result_chars ?? DEFAULT_WORKSPACE_TURN_RESULT_CHARS;
+      const budgeted = applyWorkspaceTurnResultBudget(steps, resultCharBudget);
       const result = `Workspace turn completed ${steps.length}/${operations.length} operation(s)${stoppedEarly ? " and stopped early" : ""}.`;
       logToolCall(config, {
         tool: "workspace_turn",
@@ -504,11 +675,56 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           completed: steps.length,
           requested: operations.length,
           stopped_early: stoppedEarly,
-          steps,
+          result_char_budget: resultCharBudget,
+          result_chars: budgeted.resultChars,
+          truncated_results: budgeted.truncatedResults,
+          steps: budgeted.steps,
         },
       };
     },
   );
+}
+
+function applyWorkspaceTurnResultBudget(
+  steps: WorkspaceTurnStep[],
+  resultCharBudget: number,
+): { steps: WorkspaceTurnStep[]; resultChars: number; truncatedResults: number } {
+  let remaining = resultCharBudget;
+  let resultChars = 0;
+  let truncatedResults = 0;
+  const budgeted = steps.map((step, index) => {
+    if (step.result === undefined) return step;
+    const remainingSteps = Math.max(1, steps.length - index);
+    const fairShare = Math.max(0, Math.floor(remaining / remainingSteps));
+    const result = truncateWorkspaceTurnResult(step.result, fairShare);
+    remaining = Math.max(0, remaining - result.text.length);
+    resultChars += result.text.length;
+    if (result.truncated) truncatedResults += 1;
+    return {
+      ...step,
+      result: result.text,
+      result_truncated: result.truncated || undefined,
+    };
+  });
+  return { steps: budgeted, resultChars, truncatedResults };
+}
+
+function truncateWorkspaceTurnResult(
+  result: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (result.length <= maxChars) return { text: result, truncated: false };
+  if (maxChars <= 0) return { text: "", truncated: true };
+  if (maxChars <= WORKSPACE_TURN_TRUNCATION_NOTICE.length) {
+    return {
+      text: WORKSPACE_TURN_TRUNCATION_NOTICE.slice(0, maxChars),
+      truncated: true,
+    };
+  }
+  return {
+    text: `${result.slice(0, maxChars - WORKSPACE_TURN_TRUNCATION_NOTICE.length)}${WORKSPACE_TURN_TRUNCATION_NOTICE}`,
+    truncated: true,
+  };
 }
 
 function workspaceTurnProcessStep(

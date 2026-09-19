@@ -120,6 +120,93 @@ test("workspace_turn batches reads and commands in one Codex tool call", async (
   assert.doesNotMatch(rendered, /batch-command/);
 });
 
+test("workspace_turn fairly bounds aggregate model-readable result context", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-budget"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  const largeA = Array.from({ length: 500 }, (_, index) => `A${index.toString().padStart(4, "0")}-${"a".repeat(48)}`).join("\n");
+  const largeB = Array.from({ length: 500 }, (_, index) => `B${index.toString().padStart(4, "0")}-${"b".repeat(48)}`).join("\n");
+  await writeFile(join(context.project, "large-a.txt"), `${largeA}\n`);
+  await writeFile(join(context.project, "large-b.txt"), `${largeB}\n`);
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      max_result_chars: 4_000,
+      operations: [
+        { kind: "read", path: "large-a.txt", limit: 500 },
+        { kind: "read", path: "large-b.txt", limit: 500 },
+      ],
+    },
+  });
+  const structured = structuredContent(response);
+  assert.equal(structured.result_char_budget, 4_000);
+  assert.equal(structured.result_chars, 4_000);
+  assert.equal(structured.truncated_results, 2);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  assert.equal(steps.length, 2);
+  assert.equal(steps.every((step) => step.result_truncated === true), true);
+  assert.equal(steps.every((step) => String(step.result ?? "").length === 2_000), true);
+  assert.match(String(steps[0]?.result ?? ""), /result truncated to the turn context budget/);
+  assert.match(String(steps[1]?.result ?? ""), /result truncated to the turn context budget/);
+});
+
+test("workspace_turn checkpoints resume task state and report bounded workspace deltas", async (t) => {
+  const context = await fixture(t, { git: true, toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "workspace-task-resume"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const checkpointResponse = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [{
+        kind: "checkpoint",
+        status: "active",
+        summary: "Implemented task checkpoint persistence.",
+        next_step: "Validate workspace delta behavior.",
+      }],
+    },
+  });
+  const checkpoint = (structuredContent(checkpointResponse).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(checkpoint?.ok, true);
+  assert.equal(checkpoint?.checkpoint_status, "active");
+
+  await writeFile(join(context.project, "README.md"), "hello\nchanged after checkpoint\n");
+  await writeFile(join(context.project, "later.txt"), "later\n");
+  const deltaResponse = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [{ kind: "delta", max_files: 1 }],
+    },
+  });
+  const delta = (structuredContent(deltaResponse).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(delta?.ok, true);
+  assert.equal(delta?.changed_file_count, 2);
+  assert.equal((delta?.changed_files as string[]).length, 1);
+  assert.equal(delta?.omitted_files, 1);
+  assert.match(String(delta?.result ?? ""), /Implemented task checkpoint persistence/);
+  assert.match(String(delta?.result ?? ""), /Validate workspace delta behavior/);
+
+  const resumed = structuredContent(
+    await callOpen(context.client, context.project, "workspace-task-resume"),
+  );
+  assert.equal(resumed.workspace_id, workspaceId);
+  const resume = resumed.resume as Record<string, unknown>;
+  assert.equal(resume.status, "active");
+  assert.equal(resume.summary, "Implemented task checkpoint persistence.");
+  assert.equal(resume.next_step, "Validate workspace delta behavior.");
+  assert.match(String(resumed.instruction), /Resume checkpoint/);
+  assert.match(String(resumed.instruction), /workspace_turn delta/);
+});
+
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {
   const context = await fixture(t, { toolMode: "claude", uiEnabled: false });
   const workspaceId = structuredContent(

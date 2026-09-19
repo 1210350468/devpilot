@@ -47,6 +47,11 @@ const migrations: Migration[] = [
     name: "local-agent-turns",
     up: migrateLocalAgentTurns,
   },
+  {
+    version: 9,
+    name: "workspace-task-checkpoints",
+    up: migrateWorkspaceTaskCheckpoints,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -286,6 +291,26 @@ function migrateLocalAgentTurns(sqlite: Database.Database): void {
 
     create index if not exists local_agent_turns_status_idx
       on local_agent_turns(status);
+  `);
+}
+
+function migrateWorkspaceTaskCheckpoints(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists workspace_task_checkpoints (
+      workspace_session_id text primary key,
+      status text not null default 'active',
+      summary text not null,
+      next_step text,
+      snapshot_ref text,
+      created_at text not null,
+      updated_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists workspace_task_checkpoints_updated_idx
+      on workspace_task_checkpoints(updated_at desc);
   `);
 }
 

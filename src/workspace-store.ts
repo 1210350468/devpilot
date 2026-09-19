@@ -4,13 +4,16 @@ import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
   workspaceConversationBindings,
   workspaceSessions,
+  workspaceTaskCheckpoints,
   type WorkspaceConversationBindingRow,
   type WorkspaceSessionRow,
+  type WorkspaceTaskCheckpointRow,
 } from "./db/schema.js";
 
 export type WorkspaceMode = "checkout" | "worktree";
 export type WorkspaceStatus = "active" | "inactive" | "pruned";
 export type WorkspaceRecoveryKind = "head" | "stash";
+export type WorkspaceTaskStatus = "active" | "blocked" | "done";
 
 export class WorkspaceStoreError extends TaggedError("WorkspaceStoreError")<{
   code: "WORKSPACE_STORE_ERROR";
@@ -53,6 +56,16 @@ export interface WorkspaceConversationBinding {
   lastUsedAt: string;
 }
 
+export interface WorkspaceTaskCheckpoint {
+  workspaceSessionId: string;
+  status: WorkspaceTaskStatus;
+  summary: string;
+  nextStep?: string;
+  snapshotRef?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface WorkspaceStore {
   createSession(input: {
     id: string;
@@ -81,6 +94,14 @@ export interface WorkspaceStore {
   }): WorkspaceConversationBinding;
   touchConversationBinding(conversationScopeId: string, targetKey: string): void;
   deleteConversationBinding(conversationScopeId: string, targetKey: string): void;
+  getTaskCheckpoint(workspaceSessionId: string): WorkspaceTaskCheckpoint | undefined;
+  setTaskCheckpoint(input: {
+    workspaceSessionId: string;
+    status: WorkspaceTaskStatus;
+    summary: string;
+    nextStep?: string;
+    snapshotRef?: string;
+  }): WorkspaceTaskCheckpoint;
   close?(): void;
 }
 
@@ -304,6 +325,55 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .run();
   }
 
+  getTaskCheckpoint(workspaceSessionId: string): WorkspaceTaskCheckpoint | undefined {
+    const row = this.database.db
+      .select()
+      .from(workspaceTaskCheckpoints)
+      .where(eq(workspaceTaskCheckpoints.workspaceSessionId, workspaceSessionId))
+      .get();
+
+    return row ? rowToWorkspaceTaskCheckpoint(row) : undefined;
+  }
+
+  setTaskCheckpoint(input: {
+    workspaceSessionId: string;
+    status: WorkspaceTaskStatus;
+    summary: string;
+    nextStep?: string;
+    snapshotRef?: string;
+  }): WorkspaceTaskCheckpoint {
+    const now = new Date().toISOString();
+    const row = this.database.db
+      .insert(workspaceTaskCheckpoints)
+      .values({
+        workspaceSessionId: input.workspaceSessionId,
+        status: input.status,
+        summary: input.summary,
+        nextStep: input.nextStep ?? null,
+        snapshotRef: input.snapshotRef ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: workspaceTaskCheckpoints.workspaceSessionId,
+        set: {
+          status: input.status,
+          summary: input.summary,
+          nextStep: input.nextStep ?? null,
+          snapshotRef: input.snapshotRef ?? null,
+          updatedAt: now,
+        },
+      })
+      .returning()
+      .get();
+
+    if (!row) {
+      throw new Error("Workspace task checkpoint upsert returned no row.");
+    }
+
+    return rowToWorkspaceTaskCheckpoint(row);
+  }
+
   close(): void {
     this.database.close();
   }
@@ -360,6 +430,23 @@ function rowToWorkspaceConversationBinding(
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
   };
+}
+
+function rowToWorkspaceTaskCheckpoint(row: WorkspaceTaskCheckpointRow): WorkspaceTaskCheckpoint {
+  return {
+    workspaceSessionId: row.workspaceSessionId,
+    status: readWorkspaceTaskStatus(row.status),
+    summary: row.summary,
+    nextStep: row.nextStep ?? undefined,
+    snapshotRef: row.snapshotRef ?? undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function readWorkspaceTaskStatus(status: string): WorkspaceTaskStatus {
+  if (status === "active" || status === "blocked" || status === "done") return status;
+  throw new Error(`Unknown workspace task checkpoint status: ${status}`);
 }
 
 function workspaceStoreResult<T>(

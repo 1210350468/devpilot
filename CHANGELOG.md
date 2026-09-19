@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Persistent Workspace Channel v1
+## Unreleased — Persistent Workspace Channel v2
 
 - Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.
@@ -10,6 +10,11 @@
 - Keep detailed `workspace_turn` output in structured step results only, avoiding a second copy of large reads in ordinary text content.
 - Validate through a separate OpenAI Secure MCP Tunnel: warm GTNH reopen reached 13 ms, restart recovery 3718 ms after scan optimization, and four reads plus one command completed in one 264 ms workspace turn.
 - Develop and validate the feature in an isolated worktree before any promotion to `main`.
+- Add conversation-workspace task checkpoints with durable `active / blocked / done` state, concise summary/next-step recovery, and SQLite migration coverage.
+- Add bounded Git workspace deltas to `workspace_turn`, returning changed paths and aggregate line counts instead of reinjecting a full patch.
+- Return an optional compact `resume` checkpoint from repeated `open_workspace` calls so long-running work can continue after process restart without rereading broad project context.
+- Bound aggregate `workspace_turn` step text with a fair configurable context budget (32k characters by default, 4k–96k supported) and explicit per-step truncation metadata.
+- Fix the Windows stop launcher to terminate the current `supervisorPid` written by runtime state while retaining the legacy `pid` fallback.
 
 ## 2026-09-15 — Upstream-first DevPilot
 

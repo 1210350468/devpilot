@@ -6,6 +6,8 @@ import type {
   WorkspaceMode,
   WorkspaceSession,
   WorkspaceStore,
+  WorkspaceTaskCheckpoint,
+  WorkspaceTaskStatus,
 } from "./workspace-store.js";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -437,6 +439,28 @@ export class WorkspaceRegistry {
   resolveWorkingDirectory(workspace: Workspace, workingDirectory: string | undefined): string {
     const directory = workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
     return assertAllowedPath(directory, [workspace.root]);
+  }
+
+  getTaskCheckpoint(workspaceId: string): WorkspaceTaskCheckpoint | undefined {
+    return this.store?.getTaskCheckpoint(workspaceId);
+  }
+
+  setTaskCheckpoint(
+    workspaceId: string,
+    input: {
+      status: WorkspaceTaskStatus;
+      summary: string;
+      nextStep?: string;
+      snapshotRef?: string;
+    },
+  ): WorkspaceTaskCheckpoint {
+    if (!this.store) {
+      throw new Error("Workspace task checkpoints require persistent workspace state.");
+    }
+    return this.store.setTaskCheckpoint({
+      workspaceSessionId: workspaceId,
+      ...input,
+    });
   }
 
   private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {
