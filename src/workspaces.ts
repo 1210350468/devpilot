@@ -654,6 +654,7 @@ const SKIPPED_CONTEXT_DIRS = new Set([
   ".turbo",
   ".cache",
 ]);
+const CONTEXT_SCAN_DIRECTORY_CONCURRENCY = 24;
 
 export function formatAgentsPath(path: string, workspaceRoot: string | undefined): string {
   if (!workspaceRoot) return path.split(sep).join("/");
@@ -713,23 +714,34 @@ async function walkWorkspace(
   directory: string,
   visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
 ): Promise<void> {
-  let entries;
-  try {
-    entries = await opendir(directory);
-  } catch {
-    return;
-  }
+  const pendingDirectories = [directory];
 
-  for await (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-        await walkWorkspace(path, visit);
+  while (pendingDirectories.length > 0) {
+    const batch = pendingDirectories.splice(0, CONTEXT_SCAN_DIRECTORY_CONCURRENCY);
+    const nestedDirectories = await Promise.all(batch.map(async (currentDirectory) => {
+      let entries;
+      try {
+        entries = await opendir(currentDirectory);
+      } catch {
+        return [] as string[];
       }
-      continue;
-    }
 
-    await visit(path, entry);
+      const discoveredDirectories: string[] = [];
+      for await (const entry of entries) {
+        const path = join(currentDirectory, entry.name);
+        if (entry.isDirectory()) {
+          if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) discoveredDirectories.push(path);
+          continue;
+        }
+
+        await visit(path, entry);
+      }
+      return discoveredDirectories;
+    }));
+
+    for (const directories of nestedDirectories) {
+      pendingDirectories.push(...directories);
+    }
   }
 }
 

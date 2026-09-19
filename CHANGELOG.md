@@ -6,6 +6,9 @@
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.
 - Mirror each batched step's model-readable output into structured content so ChatGPT hosts receive the actual file or command results.
 - Keep `apply_patch` and `show_changes` separate so mutation and review boundaries remain explicit.
+- Preserve full nested instruction discovery while parallelizing directory traversal to reduce large-workspace cold-open latency.
+- Keep detailed `workspace_turn` output in structured step results only, avoiding a second copy of large reads in ordinary text content.
+- Validate through a separate OpenAI Secure MCP Tunnel: warm GTNH reopen reached 13 ms, restart recovery 3718 ms after scan optimization, and four reads plus one command completed in one 264 ms workspace turn.
 - Develop and validate the feature in an isolated worktree before any promotion to `main`.
 
 ## 2026-09-15 — Upstream-first DevPilot

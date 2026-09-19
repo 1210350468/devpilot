@@ -115,8 +115,9 @@ test("workspace_turn batches reads and commands in one Codex tool call", async (
   assert.match(String(steps[0]?.result ?? ""), /batch-read/);
   assert.match(String(steps[1]?.result ?? ""), /batch-command/);
   const rendered = JSON.stringify(response.content);
-  assert.match(rendered, /batch-read/);
-  assert.match(rendered, /batch-command/);
+  assert.match(rendered, /Workspace turn completed 2\/2 operation/);
+  assert.doesNotMatch(rendered, /batch-read/);
+  assert.doesNotMatch(rendered, /batch-command/);
 });
 
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {

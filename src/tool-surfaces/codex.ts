@@ -10,7 +10,6 @@ import {
   SHELL_TOOL_ANNOTATIONS,
   toolNames,
   workspaceIdDescription,
-  type ToolContent,
   type ToolRegistrationContext,
 } from "./types.js";
 import {
@@ -426,12 +425,9 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       const workspaceId = workspace_id;
       const stopOnError = stop_on_error ?? true;
       const workspace = await workspaces.getWorkspace(workspaceId);
-      const content: ToolContent[] = [];
       const steps: WorkspaceTurnStep[] = [];
 
       for (const [index, operation] of operations.entries()) {
-        content.push(textBlock(`--- workspace_turn ${index + 1}/${operations.length}: ${operation.kind} ---`));
-
         if (operation.kind === "read") {
           const readPath = workspaces.resolveReadPath(workspace, operation.path);
           const response = await readFileTool(
@@ -446,7 +442,6 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
               readRoots: readPath.readRoots,
             },
           );
-          content.push(...response.content);
           const step: WorkspaceTurnStep = {
             index,
             kind: operation.kind,
@@ -469,7 +464,6 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
             yieldTimeMs: operation.yield_time_ms,
             maxOutputTokens: operation.max_output_tokens,
           });
-          content.push(textBlock(processResult(snapshot)));
           const ok = snapshot.running || snapshot.exitCode === 0;
           steps.push(workspaceTurnProcessStep(index, operation.kind, operation.cmd, snapshot, ok));
           if (!ok && stopOnError) break;
@@ -483,7 +477,6 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           yieldTimeMs: operation.yield_time_ms,
           maxOutputTokens: operation.max_output_tokens,
         });
-        content.push(textBlock(processResult(snapshot)));
         const ok = snapshot.running || snapshot.exitCode === 0;
         steps.push(workspaceTurnProcessStep(
           index,
@@ -505,7 +498,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       });
 
       return {
-        content: [textBlock(result), ...content],
+        content: [textBlock(result)],
         structuredContent: {
           result,
           completed: steps.length,
