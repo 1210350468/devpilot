@@ -361,7 +361,7 @@ if (process.env.DEVPILOT_LEGACY_LOCAL_WORKTREES === "1") {
 if (edits.length > 0) setDevspaceConfigValues(edits);
 '@
   Push-Location $ProjectRoot
-  try { & $node.Source --input-type=module --eval $migrationScript } finally { Pop-Location }
+  try { $migrationScript | & $node.Source --input-type=module } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "legacy config.json 迁移失败。" }
   Remove-Item Env:DEVPILOT_LEGACY_LOCAL_STATE, Env:DEVPILOT_LEGACY_LOCAL_WORKTREES, Env:DEVPILOT_LEGACY_STATE_DIR, Env:DEVPILOT_LEGACY_WORKTREE_ROOT -ErrorAction SilentlyContinue
   Write-Host "[配置] legacy 配置迁移完成；缺省状态目录已固定到当前 DevPilot runtime。" -ForegroundColor Cyan
