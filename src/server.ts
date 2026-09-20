@@ -48,6 +48,8 @@ import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { GoalStore } from "./goal-store.js";
+import { registerGoalTool } from "./goal-tool.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -136,8 +138,9 @@ function serverInstructions(
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in available_agents_files, use ${toolNames.read} to inspect that instruction file and follow it. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
+  const goalInstruction = " When the user explicitly asks for a persistent Goal, use the goal tool to store its objective, acceptance criteria, evidence, and resumable state. The host remains the reasoning agent; do not substitute local subagents for Goal reasoning unless the user separately requests them.";
 
-  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
+  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}${goalInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -309,6 +312,7 @@ async function assertWorkspaceAppAssets(): Promise<void> {
 export function createMcpServer(
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
+  goalStore: GoalStore,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
@@ -327,6 +331,7 @@ export function createMcpServer(
     server,
     config,
     workspaces,
+    goalStore,
     reviewCheckpoints,
     processSessions,
     resolveLocalAgentProviders,
@@ -340,6 +345,7 @@ function registerMcpSurface(
   server: McpRegistrationTarget,
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
+  goalStore: GoalStore,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
@@ -736,6 +742,13 @@ function registerMcpSurface(
     processSessions,
   });
 
+  registerGoalTool({
+    server: registrationTarget,
+    config,
+    goalStore,
+    workspaces,
+  });
+
   registerAppTool(
     registrationTarget,
     "show_changes",
@@ -865,6 +878,7 @@ export function createServer(
     : undefined;
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const goalStore = new GoalStore(config.stateDir);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const toolActivities = new ToolActivityTracker();
@@ -882,6 +896,7 @@ export function createServer(
       target,
       config,
       workspaces,
+      goalStore,
       reviewCheckpoints,
       processSessions,
       resolveLocalAgentProviders,
@@ -1073,6 +1088,7 @@ export function createServer(
         await toolActivities.waitForIdle();
         processSessions.shutdown();
         oauthProvider?.close();
+        goalStore.close();
         workspaceStore.close?.();
       })();
       return closePromise;

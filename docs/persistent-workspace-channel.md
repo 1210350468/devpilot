@@ -111,6 +111,10 @@ The v2 experiment intentionally keeps the top-level Codex surface at seven tools
 
 The OpenAI Secure Tunnel experiment also exposed a launcher lifecycle defect unrelated to task persistence: `runtime.json` stores `supervisorPid`, while the stop script still looked only for legacy `pid`. The script now prefers `supervisorPid` with `pid` as a compatibility fallback. A live stop test terminated the reported Supervisor PID and released all three experimental ports before restart. After restart, the same synthetic OpenAI conversation scope recovered the same workspace ID and task checkpoint, and `delta` still reported only the post-checkpoint documentation edit.
 
+## Next layer: GPT-native Goals
+
+PWC v2 keeps a task checkpoint scoped to one workspace/conversation recovery path. Longer autonomous work needs a higher-level identity whose lifetime is not tied to one ChatGPT conversation. The GPT-native Goal layer builds on PWC rather than replacing it: one Goal owns a workspace session, while multiple ChatGPT conversations can attach to the Goal and recover its compact Resume Capsule, acceptance criteria, evidence, journal, and next step. See `docs/gpt-native-goals.md`.
+
 ## Production promotion rehearsal
 
 Before any production promotion, the candidate was exercised against copies of the currently installed DevPilot configuration and runtime metadata in isolated detached worktrees. The rehearsal exposed several upgrade-path issues that ordinary feature tests did not cover.

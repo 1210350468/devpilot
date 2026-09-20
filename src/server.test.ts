@@ -16,6 +16,7 @@ import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
+import { GoalStore } from "./goal-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
@@ -28,11 +29,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "write", "edit", "bash", "show_changes"],
+      expected: ["open_workspace", "read", "write", "edit", "bash", "goal", "show_changes"],
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "workspace_turn", "show_changes"],
+      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "workspace_turn", "goal", "show_changes"],
     },
   ];
 
@@ -47,6 +48,55 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       );
     });
   }
+});
+
+test("persistent goal attaches across ChatGPT conversations and refuses premature completion", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(await callOpen(context.client, context.project, "goal-chat-a"));
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const started = structuredContent(await callGoal(context.client, {
+    action: "start",
+    workspace_id: workspaceId,
+    objective: "Complete a durable test Goal.",
+    criteria: [{ id: "tests", description: "Focused tests pass." }],
+    constraints: ["Do not touch production."],
+    next_step: "Run the focused test.",
+  }, "goal-chat-a"));
+  const startedGoal = started.goal as Record<string, unknown>;
+  const goalId = startedGoal.goal_id;
+  assert.equal(typeof goalId, "string");
+  assert.equal(startedGoal.workspace_id, workspaceId);
+  assert.equal(startedGoal.status, "running");
+
+  const sameChat = structuredContent(await callGoal(context.client, { action: "status" }, "goal-chat-a"));
+  assert.equal((sameChat.goal as Record<string, unknown>).goal_id, goalId);
+
+  const premature = await callGoal(context.client, { action: "finish" }, "goal-chat-a");
+  assert.equal(premature.isError, true);
+  assert.equal(structuredContent(premature).error_code, "GOAL_NOT_COMPLETE");
+
+  const attached = structuredContent(await callGoal(context.client, {
+    action: "attach",
+    goal_id: goalId,
+  }, "goal-chat-b"));
+  assert.equal((attached.goal as Record<string, unknown>).workspace_id, workspaceId);
+
+  const verified = structuredContent(await callGoal(context.client, {
+    action: "verify",
+    criterion_updates: [{
+      id: "tests",
+      status: "passed",
+      evidence: [{ kind: "test", summary: "Focused test passed.", ref: "run-1" }],
+      verification_source: "server.test.ts",
+    }],
+  }, "goal-chat-b"));
+  assert.equal((verified.goal as Record<string, unknown>).status, "verifying");
+
+  const finished = structuredContent(await callGoal(context.client, { action: "finish" }, "goal-chat-b"));
+  assert.equal((finished.goal as Record<string, unknown>).status, "succeeded");
+  assert.equal((finished.goal as Record<string, unknown>).workspace_id, workspaceId);
 });
 
 test("model-facing tool schemas use snake_case recursively", async (t) => {
@@ -837,10 +887,12 @@ async function fixture(
     resolveProviderAvailability(),
   );
   const store = new SqliteWorkspaceStore(stateDir);
+  const goalStore = new GoalStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
   const server = createMcpServer(
     config,
     workspaces,
+    goalStore,
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
     resolveLocalAgentProviders,
@@ -859,6 +911,7 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
+    goalStore.close();
     store.close();
   };
 
@@ -1004,6 +1057,21 @@ async function callOpen(
   const params = {
     name: "open_workspace",
     arguments: { path },
+    ...(conversationScopeId
+      ? { _meta: { "openai/session": conversationScopeId } }
+      : {}),
+  } as Parameters<Client["callTool"]>[0];
+  return client.callTool(params);
+}
+
+async function callGoal(
+  client: Client,
+  argumentsValue: Record<string, unknown>,
+  conversationScopeId?: string,
+): Promise<Awaited<ReturnType<Client["callTool"]>>> {
+  const params = {
+    name: "goal",
+    arguments: argumentsValue,
     ...(conversationScopeId
       ? { _meta: { "openai/session": conversationScopeId } }
       : {}),

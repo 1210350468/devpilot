@@ -2,6 +2,11 @@
 
 ## Unreleased — Persistent Workspace Channel v2
 
+- Start the GPT-native Persistent Goal runtime as the next PWC slice. A new top-level `goal` MCP tool persists objective, acceptance criteria, evidence, compact resume state, cross-conversation attachments, and an append-only event journal in the existing DevPilot SQLite database; the ChatGPT host remains the reasoning agent and no local model is required.
+- Add SQLite migration 10 (`persistent-goals`) with goal, criterion, conversation-binding, and event tables linked to the existing workspace-session lifecycle.
+- Make Goal completion fail closed: `goal finish` returns `GOAL_NOT_COMPLETE` while any required criterion is not verified as passed, so a browser continuation layer can rely on durable Goal state instead of assistant prose.
+- Validate that a Goal created in one OpenAI conversation can attach to a second conversation and continue against the same persisted workspace session without copying the old chat transcript.
+
 - Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.
 - Mirror each batched step's model-readable output into structured content so ChatGPT hosts receive the actual file or command results.
