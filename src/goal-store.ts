@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
+  goalBrowserBindings,
   goalConversationBindings,
   goalCriteria,
   goalEvents,
   goals,
   type GoalCriterionRow,
   type GoalEventRow,
+  type GoalBrowserBindingRow,
   type GoalRow,
 } from "./db/schema.js";
 
@@ -91,6 +93,42 @@ export interface GoalEvent {
   payload: Record<string, unknown>;
   createdAt: string;
 }
+
+export interface GoalBrowserBinding {
+  goalId: string;
+  adapter: string;
+  conversationUrl?: string;
+  conversationKey?: string;
+  rotationCount: number;
+  updatedAt: string;
+}
+
+export type GoalContinuationDecision =
+  | {
+      kind: "claimed";
+      goal: PersistentGoal;
+      roundNumber: number;
+      nonce: string;
+      leaseOwner: string;
+      leaseUntil: string;
+      idempotent: boolean;
+    }
+  | {
+      kind: "busy";
+      goal: PersistentGoal;
+      leaseOwner?: string;
+      leaseUntil?: string;
+    }
+  | {
+      kind: "stopped";
+      goal: PersistentGoal;
+      reason: string;
+    }
+  | {
+      kind: "budget_exhausted";
+      goal: PersistentGoal;
+      reason: "max_rounds" | "max_wall_time";
+    };
 
 export interface GoalCriterionInput {
   id: string;
@@ -339,6 +377,221 @@ export class GoalStore {
       .map(rowToGoalEvent);
   }
 
+  listContinuableGoals(): PersistentGoal[] {
+    const rows = this.database.db.select().from(goals)
+      .where(eq(goals.status, "running"))
+      .all();
+    const verifyingRows = this.database.db.select().from(goals)
+      .where(eq(goals.status, "verifying"))
+      .all();
+    return [...rows, ...verifyingRows]
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .map((row) => this.requireGoal(row.id));
+  }
+
+  getBrowserBinding(goalId: string): GoalBrowserBinding | undefined {
+    const row = this.database.db.select().from(goalBrowserBindings)
+      .where(eq(goalBrowserBindings.goalId, goalId))
+      .get();
+    return row ? rowToGoalBrowserBinding(row) : undefined;
+  }
+
+  setBrowserBinding(input: {
+    goalId: string;
+    adapter: string;
+    conversationUrl?: string;
+    conversationKey?: string;
+    rotated?: boolean;
+    now?: Date;
+  }): GoalBrowserBinding {
+    this.requireGoal(input.goalId);
+    const now = (input.now ?? new Date()).toISOString();
+    const existing = this.getBrowserBinding(input.goalId);
+    const row = this.database.db.insert(goalBrowserBindings).values({
+      goalId: input.goalId,
+      adapter: input.adapter,
+      conversationUrl: input.conversationUrl ?? null,
+      conversationKey: input.conversationKey ?? null,
+      rotationCount: (existing?.rotationCount ?? 0) + (input.rotated ? 1 : 0),
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: goalBrowserBindings.goalId,
+      set: {
+        adapter: input.adapter,
+        conversationUrl: input.conversationUrl ?? existing?.conversationUrl ?? null,
+        conversationKey: input.conversationKey ?? existing?.conversationKey ?? null,
+        rotationCount: (existing?.rotationCount ?? 0) + (input.rotated ? 1 : 0),
+        updatedAt: now,
+      },
+    }).returning().get();
+    if (!row) throw new Error("Goal browser binding upsert returned no row.");
+    return rowToGoalBrowserBinding(row);
+  }
+
+  claimContinuation(input: {
+    goalId: string;
+    leaseOwner: string;
+    nonce: string;
+    leaseMs?: number;
+    now?: Date;
+  }): GoalContinuationDecision {
+    const leaseMs = Math.max(5_000, Math.min(300_000, Math.floor(input.leaseMs ?? 60_000)));
+    const now = input.now ?? new Date();
+    const nowIso = now.toISOString();
+    const nowMs = now.getTime();
+
+    const result = this.database.sqlite.transaction(() => {
+      const row = this.database.db.select().from(goals).where(eq(goals.id, input.goalId)).get();
+      if (!row) throw new Error(`Unknown goal: ${input.goalId}`);
+      const status = readGoalStatus(row.status);
+      if (status !== "running" && status !== "verifying") {
+        return { kind: "stopped" as const, reason: `status:${status}` };
+      }
+
+      const activeLeaseUntilMs = row.leaseUntil ? Date.parse(row.leaseUntil) : Number.NaN;
+      const activeLease = Boolean(
+        row.leaseOwner
+        && Number.isFinite(activeLeaseUntilMs)
+        && activeLeaseUntilMs > nowMs,
+      );
+      if (row.lastResumeNonce === input.nonce) {
+        if (activeLease && row.leaseOwner !== input.leaseOwner) {
+          return {
+            kind: "busy" as const,
+            leaseOwner: row.leaseOwner ?? undefined,
+            leaseUntil: row.leaseUntil ?? undefined,
+          };
+        }
+        const leaseUntil = activeLease && row.leaseUntil
+          ? row.leaseUntil
+          : new Date(nowMs + leaseMs).toISOString();
+        if (!activeLease) {
+          this.database.db.update(goals).set({
+            leaseOwner: input.leaseOwner,
+            leaseUntil,
+            pendingResume: "true",
+            updatedAt: nowIso,
+          }).where(eq(goals.id, row.id)).run();
+          this.insertEvent(row.id, "continuation_reclaimed", row.roundNumber, {}, nowIso);
+        }
+        return {
+          kind: "claimed" as const,
+          roundNumber: row.roundNumber,
+          leaseUntil,
+          idempotent: true,
+        };
+      }
+
+      if (activeLease) {
+        return {
+          kind: "busy" as const,
+          leaseOwner: row.leaseOwner ?? undefined,
+          leaseUntil: row.leaseUntil ?? undefined,
+        };
+      }
+
+      if (row.roundNumber >= row.maxRounds) {
+        this.markGoalBudgetExhausted(row.id, row.roundNumber, "max_rounds", nowIso);
+        return { kind: "budget_exhausted" as const, reason: "max_rounds" as const };
+      }
+      const createdAtMs = Date.parse(row.createdAt);
+      if (Number.isFinite(createdAtMs)
+        && nowMs - createdAtMs >= row.maxWallTimeMinutes * 60_000) {
+        this.markGoalBudgetExhausted(row.id, row.roundNumber, "max_wall_time", nowIso);
+        return { kind: "budget_exhausted" as const, reason: "max_wall_time" as const };
+      }
+
+      const roundNumber = row.roundNumber + 1;
+      const leaseUntil = new Date(nowMs + leaseMs).toISOString();
+      this.database.db.update(goals).set({
+        roundNumber,
+        leaseOwner: input.leaseOwner,
+        leaseUntil,
+        pendingResume: "true",
+        lastResumeNonce: input.nonce,
+        updatedAt: nowIso,
+      }).where(eq(goals.id, row.id)).run();
+      this.insertEvent(row.id, "continuation_claimed", roundNumber, {}, nowIso);
+      return {
+        kind: "claimed" as const,
+        roundNumber,
+        leaseUntil,
+        idempotent: false,
+      };
+    }).immediate();
+
+    const goal = this.requireGoal(input.goalId);
+    if (result.kind === "claimed") {
+      return {
+        ...result,
+        goal,
+        nonce: input.nonce,
+        leaseOwner: goal.leaseOwner ?? input.leaseOwner,
+      };
+    }
+    if (result.kind === "busy") return { ...result, goal };
+    if (result.kind === "stopped") return { ...result, goal };
+    return { ...result, goal };
+  }
+
+  acknowledgeContinuation(input: {
+    goalId: string;
+    nonce: string;
+    conversationScopeId?: string;
+    now?: Date;
+  }): PersistentGoal {
+    const now = input.now ?? new Date();
+    const nowIso = now.toISOString();
+    const transaction = this.database.sqlite.transaction(() => {
+      const row = this.database.db.select().from(goals).where(eq(goals.id, input.goalId)).get();
+      if (!row) throw new Error(`Unknown goal: ${input.goalId}`);
+      if (row.lastResumeNonce !== input.nonce) {
+        throw new Error(`Goal ${input.goalId} resume nonce does not match the active continuation.`);
+      }
+      if (input.conversationScopeId) {
+        this.setConversationBinding(input.goalId, input.conversationScopeId, nowIso);
+      }
+      if (row.pendingResume === "true") {
+        this.database.db.update(goals).set({
+          pendingResume: "false",
+          updatedAt: nowIso,
+        }).where(eq(goals.id, input.goalId)).run();
+        this.insertEvent(input.goalId, "continuation_acknowledged", row.roundNumber, {}, nowIso);
+      }
+    });
+    transaction.immediate();
+    return this.requireGoal(input.goalId);
+  }
+
+  releaseContinuation(input: {
+    goalId: string;
+    leaseOwner: string;
+    nonce?: string;
+    now?: Date;
+  }): PersistentGoal {
+    const nowIso = (input.now ?? new Date()).toISOString();
+    const transaction = this.database.sqlite.transaction(() => {
+      const row = this.database.db.select().from(goals).where(eq(goals.id, input.goalId)).get();
+      if (!row) throw new Error(`Unknown goal: ${input.goalId}`);
+      if (!row.leaseOwner && !row.leaseUntil && row.pendingResume !== "true") return;
+      if (row.leaseOwner !== input.leaseOwner) {
+        throw new Error(`Goal ${input.goalId} continuation lease belongs to another owner.`);
+      }
+      if (input.nonce && row.lastResumeNonce !== input.nonce) {
+        throw new Error(`Goal ${input.goalId} resume nonce does not match the active continuation.`);
+      }
+      this.database.db.update(goals).set({
+        leaseOwner: null,
+        leaseUntil: null,
+        pendingResume: "false",
+        updatedAt: nowIso,
+      }).where(eq(goals.id, input.goalId)).run();
+      this.insertEvent(input.goalId, "continuation_released", row.roundNumber, {}, nowIso);
+    });
+    transaction.immediate();
+    return this.requireGoal(input.goalId);
+  }
+
   close(): void {
     this.database.close();
   }
@@ -369,6 +622,22 @@ export class GoalStore {
       payloadJson: JSON.stringify(payload),
       createdAt,
     }).run();
+  }
+
+  private markGoalBudgetExhausted(
+    goalId: string,
+    roundNumber: number,
+    reason: "max_rounds" | "max_wall_time",
+    now: string,
+  ): void {
+    this.database.db.update(goals).set({
+      status: "blocked",
+      leaseOwner: null,
+      leaseUntil: null,
+      pendingResume: "false",
+      updatedAt: now,
+    }).where(eq(goals.id, goalId)).run();
+    this.insertEvent(goalId, "budget_exhausted", roundNumber, { reason }, now);
   }
 }
 
@@ -437,6 +706,17 @@ function rowToGoalEvent(row: GoalEventRow): GoalEvent {
     roundNumber: row.roundNumber,
     payload: parseJsonObject(row.payloadJson),
     createdAt: row.createdAt,
+  };
+}
+
+function rowToGoalBrowserBinding(row: GoalBrowserBindingRow): GoalBrowserBinding {
+  return {
+    goalId: row.goalId,
+    adapter: row.adapter,
+    conversationUrl: row.conversationUrl ?? undefined,
+    conversationKey: row.conversationKey ?? undefined,
+    rotationCount: row.rotationCount,
+    updatedAt: row.updatedAt,
   };
 }
 

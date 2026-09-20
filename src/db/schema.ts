@@ -159,6 +159,20 @@ export const goalEvents = sqliteTable(
   ],
 );
 
+export const goalBrowserBindings = sqliteTable(
+  "goal_browser_bindings",
+  {
+    goalId: text("goal_id")
+      .primaryKey()
+      .references(() => goals.id, { onDelete: "cascade" }),
+    adapter: text("adapter").notNull(),
+    conversationUrl: text("conversation_url"),
+    conversationKey: text("conversation_key"),
+    rotationCount: integer("rotation_count").notNull().default(0),
+    updatedAt: text("updated_at").notNull(),
+  },
+);
+
 export const oauthClients = sqliteTable(
   "oauth_clients",
   {
@@ -234,5 +248,6 @@ export type GoalCriterionRow = typeof goalCriteria.$inferSelect;
 export type NewGoalCriterionRow = typeof goalCriteria.$inferInsert;
 export type GoalConversationBindingRow = typeof goalConversationBindings.$inferSelect;
 export type GoalEventRow = typeof goalEvents.$inferSelect;
+export type GoalBrowserBindingRow = typeof goalBrowserBindings.$inferSelect;
 export type LocalAgentSessionRow = typeof localAgentSessions.$inferSelect;
 export type NewLocalAgentSessionRow = typeof localAgentSessions.$inferInsert;

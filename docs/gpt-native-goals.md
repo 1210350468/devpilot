@@ -91,3 +91,43 @@ The core persistence/tool surface is only the first slice. The remaining Goal ru
 8. crash-injection and real ChatGPT Web E2E validation.
 
 The browser layer should reuse AsterBridge's verified RoxyBrowser endpoint discovery, CDP connection, target ownership, ChatGPT composer/turn binding, terminal-error detection, and bounded page-rebind logic. DevPilot should depend on a narrow browser-adapter contract rather than copy AsterBridge's complete agent/runtime stack.
+
+## Continuation lease protocol
+
+Browser continuation is coordinated in SQLite rather than inferred from timing alone. A continuation claim records:
+
+```text
+round_number
+lease_owner
+lease_until
+pending_resume
+last_resume_nonce
+```
+
+Only `running` and `verifying` Goals are continuable. A watchdog first acquires the lease and round, then sends the prompt. The prompt includes the durable Goal id, round, and resume nonce. The GPT acknowledges it by calling `goal status` or `goal attach` with the same `resume_nonce`. Acknowledgement clears `pending_resume` but leaves the lease in place until the browser observes that turn completing; this prevents another watcher from starting the next round while the current ChatGPT turn is still active.
+
+Claims are idempotent by nonce. If the watcher crashes after sending but before acknowledgement, an expired lease can be reclaimed by another watcher with the same nonce without incrementing the round. A different nonce cannot take an unexpired lease. This bounds crash recovery to at most a retry of the same idempotent continuation prompt rather than silently creating a second logical round.
+
+The continuation claim also enforces `max_rounds` and `max_wall_time_minutes`. Exhaustion transitions the Goal to `blocked`, clears continuation ownership, and prevents automatic browser sends.
+
+## Browser adapter and Watchdog core
+
+The Goal Watchdog is deliberately browser-independent. A narrow `GoalBrowserAdapter` reports one of:
+
+```text
+generating
+idle
+disconnected
+login_required
+rate_limited
+conversation_limit
+error
+```
+
+and provides only three operations: inspect, send a continuation in the current conversation, or rotate to a new conversation and send a resume prompt. The Watchdog contains Goal/lease policy; the adapter contains browser mechanics.
+
+When a page is `idle`, the Watchdog sends a compact `GOAL_CONTINUE` prompt. When it reports `conversation_limit`, it sends `GOAL_RESUME` in a newly rotated conversation and persists the new browser binding. It never claims a round while ChatGPT is generating or unavailable. `waiting_approval`, `blocked`, paused, terminal, and cancelled Goals are excluded before browser inspection.
+
+Migration 11 adds `goal_browser_bindings`, which stores only transport metadata (adapter id, conversation URL/key, rotation count). It is not task truth and it contains no transcript.
+
+The browser-independent tests cover same-chat continuation, pending acknowledgement, next-round advancement, conversation rotation, concurrent watchdog owners, unavailable/generating states, and crash recovery using the same nonce/round after lease expiry.

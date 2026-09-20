@@ -6,6 +6,8 @@
 - Add SQLite migration 10 (`persistent-goals`) with goal, criterion, conversation-binding, and event tables linked to the existing workspace-session lifecycle.
 - Make Goal completion fail closed: `goal finish` returns `GOAL_NOT_COMPLETE` while any required criterion is not verified as passed, so a browser continuation layer can rely on durable Goal state instead of assistant prose.
 - Validate that a Goal created in one OpenAI conversation can attach to a second conversation and continue against the same persisted workspace session without copying the old chat transcript.
+- Add durable continuation lease/nonce/round coordination for browser-driven Goal turns. Competing watchdog owners cannot double-send a round; an unacknowledged send can be reclaimed after lease expiry using the same nonce and round, and round/wall-time budget exhaustion moves the Goal to `blocked`.
+- Add migration 11 for Goal browser bindings and a browser-independent continuation watchdog state machine covering idle/generating/unavailable/conversation-limit states, same-chat continuation, cross-chat rotation, acknowledgement, crash retry, and duplicate-watchdog races.
 
 - Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.

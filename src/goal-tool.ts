@@ -86,6 +86,7 @@ const goalInputSchema = {
   max_no_progress_rounds: z.number().int().min(1).max(100).optional(),
   max_same_failure: z.number().int().min(1).max(100).optional(),
   history_limit: z.number().int().min(1).max(100).optional(),
+  resume_nonce: z.string().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/).optional(),
 };
 
 const criterionOutputSchema = z.object({
@@ -235,10 +236,25 @@ async function handleGoalAction(input: {
     const scope = required(conversationScopeId, "openai/session metadata", action);
     const existing = goalStore.requireGoal(goalId);
     await workspaces.getWorkspace(existing.workspaceSessionId);
-    return goalResponse(`Attached this conversation to ${goalId}.`, goalStore.attachConversation(goalId, scope));
+    let attached = goalStore.attachConversation(goalId, scope);
+    if (input.input.resume_nonce) {
+      attached = goalStore.acknowledgeContinuation({
+        goalId,
+        nonce: input.input.resume_nonce,
+        conversationScopeId: scope,
+      });
+    }
+    return goalResponse(`Attached this conversation to ${goalId}.`, attached);
   }
 
-  const goal = resolveGoal(goalStore, input.input.goal_id, conversationScopeId);
+  let goal = resolveGoal(goalStore, input.input.goal_id, conversationScopeId);
+  if (input.input.resume_nonce) {
+    goal = goalStore.acknowledgeContinuation({
+      goalId: goal.id,
+      nonce: input.input.resume_nonce,
+      conversationScopeId,
+    });
+  }
 
   if (action === "status") return goalResponse(goalStatusText(goal), goal);
   if (action === "history") {

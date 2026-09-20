@@ -139,3 +139,146 @@ test("goal status transitions fail closed", async (t) => {
   assert.throws(() => store.updateGoal({ goalId: goal.id, status: "succeeded" }), /Invalid goal status transition/);
   assert.equal(store.updateGoal({ goalId: goal.id, status: "running", eventKind: "goal_resumed" }).status, "running");
 });
+
+test("continuation claims are idempotent, leased, acknowledged, and releasable", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_continuation", root: "/tmp/continuation", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_continuation",
+    objective: "Continue across GPT turns.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+  });
+  const now = new Date("2026-09-20T00:00:00.000Z");
+  const first = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-a",
+    nonce: "resume_nonce_1",
+    leaseMs: 60_000,
+    now,
+  });
+  assert.equal(first.kind, "claimed");
+  if (first.kind !== "claimed") throw new Error("Expected claimed continuation.");
+  assert.equal(first.roundNumber, 1);
+  assert.equal(first.idempotent, false);
+  assert.equal(first.goal.pendingResume, true);
+
+  const replay = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-a",
+    nonce: "resume_nonce_1",
+    leaseMs: 60_000,
+    now,
+  });
+  assert.equal(replay.kind, "claimed");
+  if (replay.kind !== "claimed") throw new Error("Expected idempotent continuation claim.");
+  assert.equal(replay.roundNumber, 1);
+  assert.equal(replay.idempotent, true);
+
+  const competing = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "resume_nonce_2",
+    leaseMs: 60_000,
+    now,
+  });
+  assert.equal(competing.kind, "busy");
+
+  const acknowledged = store.acknowledgeContinuation({
+    goalId: goal.id,
+    nonce: "resume_nonce_1",
+    conversationScopeId: "chat-resumed",
+    now: new Date(now.getTime() + 1_000),
+  });
+  assert.equal(acknowledged.pendingResume, false);
+  assert.equal(acknowledged.leaseOwner, "watchdog-a");
+  assert.equal(store.getGoalForConversation("chat-resumed")?.id, goal.id);
+
+  const stillBusy = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "resume_nonce_2",
+    leaseMs: 60_000,
+    now: new Date(now.getTime() + 2_000),
+  });
+  assert.equal(stillBusy.kind, "busy");
+
+  const released = store.releaseContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-a",
+    nonce: "resume_nonce_1",
+    now: new Date(now.getTime() + 3_000),
+  });
+  assert.equal(released.leaseOwner, undefined);
+
+  const second = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "resume_nonce_2",
+    leaseMs: 60_000,
+    now: new Date(now.getTime() + 4_000),
+  });
+  assert.equal(second.kind, "claimed");
+  if (second.kind !== "claimed") throw new Error("Expected second continuation claim.");
+  assert.equal(second.roundNumber, 2);
+});
+
+test("expired continuation leases can be taken over and budgets block further rounds", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_budget", root: "/tmp/budget", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_budget",
+    objective: "Respect continuation budgets.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+    budgets: { maxRounds: 2 },
+  });
+  const now = new Date("2026-09-20T00:00:00.000Z");
+  assert.equal(store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-a",
+    nonce: "resume_nonce_a",
+    leaseMs: 5_000,
+    now,
+  }).kind, "claimed");
+
+  const takeover = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "resume_nonce_b",
+    leaseMs: 5_000,
+    now: new Date(now.getTime() + 6_000),
+  });
+  assert.equal(takeover.kind, "claimed");
+  if (takeover.kind !== "claimed") throw new Error("Expected takeover after lease expiry.");
+  assert.equal(takeover.roundNumber, 2);
+  store.releaseContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "resume_nonce_b",
+    now: new Date(now.getTime() + 7_000),
+  });
+
+  const exhausted = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-c",
+    nonce: "resume_nonce_c",
+    now: new Date(now.getTime() + 8_000),
+  });
+  assert.equal(exhausted.kind, "budget_exhausted");
+  if (exhausted.kind !== "budget_exhausted") throw new Error("Expected budget exhaustion.");
+  assert.equal(exhausted.reason, "max_rounds");
+  assert.equal(exhausted.goal.status, "blocked");
+});

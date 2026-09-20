@@ -57,6 +57,11 @@ const migrations: Migration[] = [
     name: "persistent-goals",
     up: migratePersistentGoals,
   },
+  {
+    version: 11,
+    name: "goal-browser-bindings",
+    up: migrateGoalBrowserBindings,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -398,6 +403,22 @@ function migratePersistentGoals(sqlite: Database.Database): void {
 
     create index if not exists goal_events_goal_idx
       on goal_events(goal_id, id desc);
+  `);
+}
+
+function migrateGoalBrowserBindings(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists goal_browser_bindings (
+      goal_id text primary key,
+      adapter text not null,
+      conversation_url text,
+      conversation_key text,
+      rotation_count integer not null default 0,
+      updated_at text not null,
+      foreign key (goal_id)
+        references goals(id)
+        on delete cascade
+    );
   `);
 }
 
