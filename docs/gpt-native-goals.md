@@ -73,6 +73,8 @@ Do not reconstruct the task from old chat history.
 Continue from the persisted next step.
 ```
 
+The Resume Capsule is now also the first input to a bounded Persistent Context projection. Goal responses advertise `@context/<goal_id>/hydrate.md`, a derived Markdown recovery view stored under DevPilot's `stateDir`. A fresh Chat reads that compact hydration file first and expands to decisions, failures, evidence, or recent durable Goal events only when the current step requires them. The cache is explicitly non-authoritative: Goal DB remains Goal truth and Git/filesystem remains workspace truth. See `docs/persistent-context.md`.
+
 ## Goal Journal
 
 Important externally useful state changes are appended to `goal_events`, for example Goal creation, conversation attachment, checkpoint, verification, approval requests, block/failure, and completion. History retrieval is bounded. Raw command logs, secrets, and hidden chain-of-thought do not belong in the journal.

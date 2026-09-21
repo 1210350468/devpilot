@@ -99,6 +99,68 @@ test("persistent goal attaches across ChatGPT conversations and refuses prematur
   assert.equal((finished.goal as Record<string, unknown>).workspace_id, workspaceId);
 });
 
+test("Goal responses advertise bounded recovery context readable through read and workspace_turn", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const conversationScopeId = "goal-context-chat";
+  const opened = structuredContent(await callOpen(context.client, context.project, conversationScopeId));
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedResponse = await callGoal(context.client, {
+    action: "start",
+    workspace_id: workspaceId,
+    objective: "Recover a long task with bounded external context.",
+    criteria: [{ id: "tests", description: "Context hydration tests pass." }],
+    constraints: ["Do not replay the old transcript."],
+    next_step: "Debug the recovery cache.",
+  }, conversationScopeId);
+  const started = structuredContent(startedResponse);
+  const goalId = (started.goal as Record<string, unknown>).goal_id;
+  assert.equal(typeof goalId, "string");
+  assert.match(JSON.stringify(startedResponse.content), new RegExp(`@context/${goalId}/hydrate\\.md`));
+
+  await callGoal(context.client, {
+    action: "checkpoint",
+    goal_id: goalId,
+    summary: "Debugged the recovery cache; verify the focused suite next.",
+    current_step: "Verify context hydration.",
+    next_step: "Run focused tests.",
+    resume_capsule: {
+      decisions: ["Keep Goal DB and Git/filesystem authoritative."],
+      current_state: "The derived Markdown cache is available.",
+      current_problem: "Need to prove fresh Chat hydration stays bounded.",
+      next_actions: ["Read hydrate.md, then run focused tests."],
+      failures: ["Do not load the full historical transcript by default."],
+      evidence: ["Goal context is stored outside the project checkout."],
+    },
+  }, conversationScopeId);
+
+  const hydrateRef = `@context/${goalId}/hydrate.md`;
+  const direct = await context.client.callTool({
+    name: "read",
+    arguments: { workspace_id: workspaceId, path: hydrateRef },
+  });
+  assert.equal(direct.isError, undefined);
+  const directText = String(structuredContent(direct).result ?? "");
+  assert.match(directText, /Derived recovery cache — not authoritative/);
+  assert.match(directText, /Keep Goal DB and Git\/filesystem authoritative/);
+  assert.match(directText, /Need to prove fresh Chat hydration stays bounded/);
+
+  const batched = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      max_result_chars: 4_000,
+      operations: [{ kind: "read", path: hydrateRef }],
+    },
+  });
+  assert.equal(batched.isError, undefined);
+  const step = (structuredContent(batched).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(step?.ok, true);
+  assert.match(String(step?.result ?? ""), /Goal Recovery Hydration/);
+  assert.ok(String(step?.result ?? "").length <= 4_000);
+});
+
 test("model-facing tool schemas use snake_case recursively", async (t) => {
   for (const toolMode of ["claude", "codex"] as const) {
     await t.test(toolMode, async (nested) => {

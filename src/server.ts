@@ -665,6 +665,7 @@ function registerMcpSurface(
         [
           "Read all or part of a file in a workspace.",
           "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+          "A Goal response may also advertise a bounded @context/<goal_id>/*.md recovery path; read that derived context before broadly replaying project history.",
           config.skillsEnabled
             ? "If available skills were returned and a task matches one, read the returned skill path before proceeding."
             : "",
@@ -679,8 +680,8 @@ function registerMcpSurface(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path relative to the workspace root, or a skill path returned by open_workspace."
-              : "File path to read, relative to the workspace root.",
+              ? "File path relative to the workspace root, a skill path returned by open_workspace, or a Goal recovery path returned by goal."
+              : "File path relative to the workspace root, or a Goal recovery path returned by goal.",
           ),
         offset: z
           .number()

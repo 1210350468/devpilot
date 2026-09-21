@@ -103,6 +103,12 @@ Batching must not trade fewer MCP calls for unbounded prompt growth. `workspace_
 
 The budget is distributed fairly over the remaining steps rather than first-come-first-served. Short results return unused capacity to later steps; oversized results are trimmed to their current fair share and carry `result_truncated=true` plus an explicit instruction to use a focused `read` or `exec` when more detail is necessary. Checkpoint and delta metadata remain separately structured, so truncating a large file body does not erase task-state fields.
 
+## Persistent Context Store
+
+Long Goal recovery now adds a second bounded layer above the workspace checkpoint without making the Chat transcript durable state. Each Goal can project its Resume Capsule, criteria/evidence, and recent Goal journal into disposable Markdown files under DevPilot `stateDir`. Goal responses advertise virtual `@context/<goal_id>/*.md` paths; both `read` and the existing `workspace_turn` `read` operation can consume them, so no extra top-level MCP tool or schema migration is needed.
+
+The normal recovery path is `Goal attach/status → hydrate.md → relevant topic file(s) → workspace delta/source reads`. `hydrate.md` is capped at 12k characters and chooses a deterministic minimal/normal/debug/verification profile. Topic files remain separately bounded, and `workspace_turn` still applies its aggregate result budget. The context cache never owns workspace facts: it is a derived acceleration index that may be discarded and regenerated. See `docs/persistent-context.md`.
+
 ### Host schema-cache compatibility
 
 The v2 experiment intentionally keeps the top-level Codex surface at seven tools. Real ChatGPT testing showed that changing only the nested `workspace_turn` operation union does not necessarily refresh an already-connected host's cached schema, even after the MCP server restarts and its own `tools/list` reports the new `checkpoint` and `delta` variants. A freshly discovered connector receives the server schema correctly. Treat this as a host-discovery compatibility boundary rather than a server-state failure; runtime validation therefore checks both the server's raw `tools/list` and the host-visible tool schema.

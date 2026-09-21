@@ -47,7 +47,7 @@ const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
 
 const workspaceTurnReadSchema = z.object({
   kind: z.literal("read"),
-  path: z.string().describe("File path relative to the workspace, or an advertised skill path."),
+  path: z.string().describe("File path relative to the workspace, an advertised skill path, or a Goal recovery path returned by goal."),
   offset: z.number().int().positive().optional(),
   limit: z.number().int().positive().optional(),
 });

@@ -13,6 +13,7 @@ import type { McpRegistrationTarget } from "./mcp-modern-server.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
 import { logToolCall, textBlock } from "./tool-surfaces/shared.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
+import { GoalContextStore } from "./goal-context.js";
 
 const GOAL_ACTIONS = [
   "start",
@@ -139,6 +140,7 @@ export function registerGoalTool(input: {
   onGoalChanged?: () => void;
 }): void {
   const { server, config, goalStore, workspaces, onGoalChanged } = input;
+  const contextStore = new GoalContextStore(config.stateDir);
   server.registerTool(
     "goal",
     {
@@ -178,6 +180,22 @@ export function registerGoalTool(input: {
             goalStore,
             workspaces,
           });
+          const responseGoalId = goalIdFromResponse(response);
+          if (responseGoalId) {
+            try {
+              const context = await contextStore.refresh(
+                goalStore.requireGoal(responseGoalId),
+                goalStore.listEvents(responseGoalId, 30),
+              );
+              response.content.push(textBlock(
+                `Recovery context cache: read ${context.hydrateRef} first; expand through ${context.manifestRef} only when the current step needs more context. The cache is derived; Goal DB and workspace Git/filesystem remain authoritative.`,
+              ));
+            } catch {
+              // Context hydration is a recovery acceleration layer, never part of Goal correctness.
+              // A cache write/read failure must not turn a successful durable Goal mutation into a
+              // failed MCP action.
+            }
+          }
         } finally {
           // The continuation service is transport/lifecycle plumbing, not Goal correctness. Wake it
           // after every Goal call so state changes become visible promptly, but never make a
@@ -204,6 +222,16 @@ export function registerGoalTool(input: {
       }
     },
   );
+}
+
+function goalIdFromResponse(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") return undefined;
+  const structured = (response as { structuredContent?: unknown }).structuredContent;
+  if (!structured || typeof structured !== "object") return undefined;
+  const goal = (structured as { goal?: unknown }).goal;
+  if (!goal || typeof goal !== "object") return undefined;
+  const goalId = (goal as { goal_id?: unknown }).goal_id;
+  return typeof goalId === "string" ? goalId : undefined;
 }
 
 type ParsedGoalInput = z.infer<z.ZodObject<typeof goalInputSchema>>;

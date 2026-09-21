@@ -36,6 +36,7 @@ import {
   loadLocalAgentProfiles,
   type LocalAgentProfile,
 } from "./local-agent-profiles.js";
+import { resolveGoalContextReadPath } from "./goal-context.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -448,6 +449,17 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const goalContextRead = resolveGoalContextReadPath(
+      this.config.stateDir,
+      workspace.id,
+      inputPath,
+    );
+    if (goalContextRead) {
+      return {
+        absolutePath: goalContextRead.absolutePath,
+        readRoots: [workspace.root, goalContextRead.root],
+      };
+    }
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
