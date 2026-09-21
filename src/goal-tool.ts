@@ -132,6 +132,15 @@ const goalOutputSchema = z.object({
   updated_at: z.string(),
 });
 
+const recoveryContextOutputSchema = z.object({
+  hydrate_ref: z.string(),
+  manifest_ref: z.string(),
+  profile: z.enum(["minimal", "normal", "debug", "verification"]),
+  generated_at: z.string(),
+  goal_updated_at: z.string(),
+  derived: z.literal(true),
+});
+
 export function registerGoalTool(input: {
   server: McpRegistrationTarget;
   config: ServerConfig;
@@ -158,6 +167,7 @@ export function registerGoalTool(input: {
           payload: z.record(z.string(), z.unknown()),
           created_at: z.string(),
         })).optional(),
+        recovery_context: recoveryContextOutputSchema.optional(),
         error_code: z.string().optional(),
         remaining_criteria: z.array(z.string()).optional(),
       },
@@ -187,6 +197,15 @@ export function registerGoalTool(input: {
                 goalStore.requireGoal(responseGoalId),
                 goalStore.listEvents(responseGoalId, 30),
               );
+              const structuredContent = response.structuredContent as Record<string, unknown>;
+              structuredContent.recovery_context = {
+                hydrate_ref: context.hydrateRef,
+                manifest_ref: context.manifestRef,
+                profile: context.profile,
+                generated_at: context.generatedAt,
+                goal_updated_at: context.goalUpdatedAt,
+                derived: true,
+              };
               response.content.push(textBlock(
                 `Recovery context cache: read ${context.hydrateRef} first; expand through ${context.manifestRef} only when the current step needs more context. The cache is derived; Goal DB and workspace Git/filesystem remain authoritative.`,
               ));

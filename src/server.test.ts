@@ -117,6 +117,11 @@ test("Goal responses advertise bounded recovery context readable through read an
   const started = structuredContent(startedResponse);
   const goalId = (started.goal as Record<string, unknown>).goal_id;
   assert.equal(typeof goalId, "string");
+  const recoveryContext = started.recovery_context as Record<string, unknown>;
+  assert.equal(recoveryContext.hydrate_ref, `@context/${goalId}/hydrate.md`);
+  assert.equal(recoveryContext.manifest_ref, `@context/${goalId}/manifest.md`);
+  assert.equal(recoveryContext.derived, true);
+  assert.equal(typeof recoveryContext.generated_at, "string");
   assert.match(JSON.stringify(startedResponse.content), new RegExp(`@context/${goalId}/hydrate\\.md`));
 
   await callGoal(context.client, {

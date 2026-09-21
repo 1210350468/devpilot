@@ -37,6 +37,8 @@ The model never needs the physical state-directory path. Goal responses advertis
 @context/goal_.../manifest.md
 ```
 
+Successful `goal` responses also expose these refs in structured output under `recovery_context`, including `hydrate_ref`, `manifest_ref`, the selected hydration profile, and source timestamps. Hosts should start with `hydrate_ref` and expand through the manifest only when the current step requires more detail.
+
 `read` and `workspace_turn` resolve those references only inside the current workspace's Goal-context directory. The virtual path grammar and file names are allowlisted, so `..` traversal and arbitrary state-directory reads fail closed.
 
 No database migration is required. No top-level MCP tool is added, which also avoids another ChatGPT connector schema-refresh boundary.
