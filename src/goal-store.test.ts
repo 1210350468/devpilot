@@ -229,6 +229,45 @@ test("continuation claims are idempotent, leased, acknowledged, and releasable",
   assert.equal(second.roundNumber, 2);
 });
 
+test("non-continuable goal states clear an in-flight continuation lease immediately", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_pause_lease", root: "/tmp/pause-lease", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_pause_lease",
+    objective: "Stop browser continuation as soon as the Goal pauses.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+  });
+  const claimed = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-a",
+    nonce: "pause_nonce_1",
+    leaseMs: 60_000,
+  });
+  assert.equal(claimed.kind, "claimed");
+
+  const paused = store.updateGoal({ goalId: goal.id, status: "paused", eventKind: "goal_paused" });
+  assert.equal(paused.pendingResume, false);
+  assert.equal(paused.leaseOwner, undefined);
+  assert.equal(paused.leaseUntil, undefined);
+
+  const resumed = store.updateGoal({ goalId: goal.id, status: "running", eventKind: "goal_resumed" });
+  assert.equal(resumed.status, "running");
+  const next = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog-b",
+    nonce: "pause_nonce_2",
+    leaseMs: 60_000,
+  });
+  assert.equal(next.kind, "claimed");
+});
+
 test("expired continuation leases can be taken over and budgets block further rounds", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
   const workspaceStore = new SqliteWorkspaceStore(stateDir);

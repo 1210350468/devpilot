@@ -277,9 +277,15 @@ export class GoalStore {
     if (input.status && input.status !== current.status) {
       assertGoalTransition(current.status, input.status);
     }
+    const continuationStops = input.status !== undefined
+      && input.status !== "running"
+      && input.status !== "verifying";
     const now = new Date().toISOString();
     this.database.db.update(goals).set({
       ...(input.status ? { status: input.status } : {}),
+      ...(continuationStops
+        ? { leaseOwner: null, leaseUntil: null, pendingResume: "false" }
+        : {}),
       ...(input.summary !== undefined ? { summary: input.summary } : {}),
       ...(input.currentStep !== undefined ? { currentStep: input.currentStep } : {}),
       ...(input.nextStep !== undefined ? { nextStep: input.nextStep } : {}),

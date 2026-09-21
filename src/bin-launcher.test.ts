@@ -54,6 +54,7 @@ function testDevPilotStartLauncherPreservesLegacyConfig(): void {
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("McpPort"\)/);
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("ControlPort"\)/);
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("TunnelHealthPort"\)/);
+  assert.match(script, /workspace_turn \/ goal/);
 }
 
 function testLinkedCheckoutReadsCurrentConfig(): void {

@@ -77,18 +77,18 @@ Continue from the persisted next step.
 
 Important externally useful state changes are appended to `goal_events`, for example Goal creation, conversation attachment, checkpoint, verification, approval requests, block/failure, and completion. History retrieval is bounded. Raw command logs, secrets, and hidden chain-of-thought do not belong in the journal.
 
-## Next implementation slices
+## Current browser-continuation slice
 
-The core persistence/tool surface is only the first slice. The remaining Goal runtime work is:
+The persistent Goal now has a real ChatGPT Web continuation path in the experimental runtime:
 
 1. continuation lease + resume nonce + idempotent round claims;
-2. browser adapter based on the proven AsterBridge RoxyBrowser/CDP primitives;
-3. robust ChatGPT page state (`GENERATING`, `IDLE`, `DISCONNECTED`, `LOGIN_REQUIRED`, `RATE_LIMITED`, `CONVERSATION_LIMIT`, `ERROR`);
-4. automatic same-chat continuation while Goal is `running` or `verifying`;
-5. cross-chat conversation rotation and `goal attach` recovery;
-6. no-progress/same-failure budgets and automatic transition to `blocked`;
-7. Control Center Goal visibility and controls;
-8. crash-injection and real ChatGPT Web E2E validation.
+2. a narrow AsterBridge/RoxyBrowser CDP adapter;
+3. ChatGPT page-state detection (`GENERATING`, `IDLE`, `DISCONNECTED`, `LOGIN_REQUIRED`, `RATE_LIMITED`, `CONVERSATION_LIMIT`, `ERROR`);
+4. automatic same-chat continuation while a Goal is `running` or `verifying`;
+5. cross-chat conversation rotation followed by `goal attach` recovery;
+6. a Supervisor-managed watchdog service that sleeps completely when no Goal is continuable.
+
+Remaining work after this slice is primarily product hardening rather than proving the continuation architecture: no-progress/same-failure policy, Control Center Goal controls, broader crash injection, proactive rotation heuristics, and the previously planned PWC latency/cold-start work.
 
 The browser layer should reuse AsterBridge's verified RoxyBrowser endpoint discovery, CDP connection, target ownership, ChatGPT composer/turn binding, terminal-error detection, and bounded page-rebind logic. DevPilot should depend on a narrow browser-adapter contract rather than copy AsterBridge's complete agent/runtime stack.
 
@@ -131,3 +131,39 @@ When a page is `idle`, the Watchdog sends a compact `GOAL_CONTINUE` prompt. When
 Migration 11 adds `goal_browser_bindings`, which stores only transport metadata (adapter id, conversation URL/key, rotation count). It is not task truth and it contains no transcript.
 
 The browser-independent tests cover same-chat continuation, pending acknowledgement, next-round advancement, conversation rotation, concurrent watchdog owners, unavailable/generating states, and crash recovery using the same nonce/round after lease expiry.
+
+## AsterBridge / RoxyBrowser transport
+
+DevPilot reuses the proven transport boundaries from AsterBridge rather than embedding AsterBridge's model/runtime stack. The adapter discovers the configured RoxyBrowser profile from AsterBridge launcher state or its current core config, opens the profile through the loopback Local API when necessary, and attaches to Chromium through `DevToolsActivePort` / CDP. The Roxy Local API key remains referenced by its AsterBridge-owned file path; DevPilot does not copy it into Goal state or logs.
+
+Browser ownership is deliberately fail-closed. A persisted `goal_browser_bindings` record is preferred. If no binding exists, DevPilot may adopt only one uniquely generating normal ChatGPT page; it does not pick an arbitrary idle tab. Existing text in the composer is never overwritten.
+
+Normal persistent Goals also exclude AsterBridge Temporary Chat. `https://chatgpt.com/` and `https://chatgpt.com/?temporary-chat=true` are different transport identities even though their pathname is the same. Conversation rotation always creates a normal ChatGPT conversation.
+
+CDP `Input.insertText` can update the editor before React enables the send button. Real RoxyBrowser testing reproduced this race, so submission waits briefly for the send control to become enabled before declaring failure. It still requires positive submission evidence (a new user/assistant turn or generating state) before returning success.
+
+## Supervisor lifecycle
+
+The experimental DevPilot Supervisor owns a lightweight `GoalWatchdogService`. With no `running` or `verifying` Goal it has no periodic timer. Goal mutations notify it, active Goals arm its polling loop, and terminal/paused/approval/blocked states disarm it. Transitions out of a continuable state clear any in-flight continuation lease immediately.
+
+Shutdown ordering is intentional: stop the watchdog first, close its GoalStore handle, then shut down the MCP server and its independent GoalStore. This prevents a late browser tick from accessing a closed SQLite connection.
+
+Control Center status exposes the watchdog snapshot (`state`, active Goal count, last tick, bounded last outcomes) and the effective tool list includes the top-level `goal` action in addition to the selected Codex/Claude surface.
+
+## Real ChatGPT Web E2E evidence
+
+The experimental `576xx` runtime completed two real web-host validations through the OpenAI Secure MCP Tunnel.
+
+Same-chat continuation: after a normal RoxyBrowser Chat became idle, the watchdog sent `GOAL_CONTINUE`. A fresh ChatGPT turn called `goal status` with the exact resume nonce, verified its required `web_ack` criterion with structured evidence, and called `goal finish`. RequestObserver recorded those remote calls under one real OpenAI conversation scope; the Goal ended `succeeded`, retained its original workspace id, and the watchdog returned to idle.
+
+Cross-chat rotation: the test harness forced only the browser-inspection result to `conversation_limit`; conversation creation, prompt submission, GPT execution, tunnel/MCP calls, and Goal persistence were all real. The watchdog created a new normal ChatGPT conversation and sent `GOAL_RESUME`. That new conversation called `goal attach` with the nonce, retained the same workspace id, verified `rotation_ack`, and finished the Goal successfully.
+
+Neither E2E modified project files or production runtime state.
+
+## ChatGPT plugin schema refresh
+
+The first real web continuation exposed a host cache boundary: the existing `devpilot_pwc_openai` development plugin still advertised its legacy seven-tool schema even though raw `57681/mcp` already returned the new `goal` tool and the PWC v2 `workspace_turn` schema. The GPT correctly refused to invent a `goal` call.
+
+Using ChatGPT Settings → Plugins → `devpilot_pwc_openai` → Update caused OpenAI to issue fresh `tools/list`, `server/discover`, and resource reads. A new ChatGPT conversation then saw and successfully called the top-level `goal` tool. This is another reason Goal is a top-level MCP action instead of another nested `workspace_turn` variant: capability refresh is observable and independently versionable.
+
+During development, after changing the top-level MCP schema, refresh the development plugin and start a fresh Chat before judging host-visible capability. Raw server discovery alone is not evidence that an already-open Chat has refreshed its tool schema.

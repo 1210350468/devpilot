@@ -126,7 +126,7 @@ function Select-TunnelProvider {
     Write-Host ""
     Write-Host $options[$selected].Help -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "当前 Codex 工具面：open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn" -ForegroundColor DarkGray
+    Write-Host "当前 Codex 工具面：open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn / goal" -ForegroundColor DarkGray
 
     $key = [Console]::ReadKey($true).Key
     switch ($key) {
@@ -518,7 +518,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "Control Center : $PanelUrl"
 Write-Host "Local MCP      : $LocalMcpUrl"
 Write-Host "Tool surface   : codex"
-Write-Host "Tools          : open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn"
+Write-Host "Tools          : open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn / goal"
 if ($TunnelProvider -eq "cloudflare-quick") {
   Write-Host "Mode           : Cloudflare Quick Tunnel"
   Write-Host "Public MCP     : $($status.tunnel.publicMcpUrl)" -ForegroundColor Cyan

@@ -136,8 +136,9 @@ export function registerGoalTool(input: {
   config: ServerConfig;
   goalStore: GoalStore;
   workspaces: WorkspaceRegistry;
+  onGoalChanged?: () => void;
 }): void {
-  const { server, config, goalStore, workspaces } = input;
+  const { server, config, goalStore, workspaces, onGoalChanged } = input;
   server.registerTool(
     "goal",
     {
@@ -169,12 +170,20 @@ export function registerGoalTool(input: {
       const startedAt = performance.now();
       const conversationScopeId = conversationScopeIdFromRequestMeta(_meta);
       try {
-        const response = await handleGoalAction({
-          input: toolInput,
-          conversationScopeId,
-          goalStore,
-          workspaces,
-        });
+        let response;
+        try {
+          response = await handleGoalAction({
+            input: toolInput,
+            conversationScopeId,
+            goalStore,
+            workspaces,
+          });
+        } finally {
+          // The continuation service is transport/lifecycle plumbing, not Goal correctness. Wake it
+          // after every Goal call so state changes become visible promptly, but never make a
+          // watchdog notification part of the MCP action's success contract.
+          try { onGoalChanged?.(); } catch { /* supervisor lifecycle may already be stopping */ }
+        }
         logToolCall(config, {
           tool: "goal",
           success: !("isError" in response && response.isError === true),

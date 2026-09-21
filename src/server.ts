@@ -318,6 +318,7 @@ export function createMcpServer(
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  onGoalChanged?: () => void,
 ): McpServer {
   const toolSurface = getToolSurface(config.toolMode);
   const server = new McpServer(
@@ -337,6 +338,7 @@ export function createMcpServer(
     resolveLocalAgentProviders,
     incomingArtifactAdapters,
     trackToolActivity,
+    onGoalChanged,
   );
   return server;
 }
@@ -351,6 +353,7 @@ function registerMcpSurface(
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  onGoalChanged?: () => void,
 ): void {
   const registrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
@@ -747,6 +750,7 @@ function registerMcpSurface(
     config,
     goalStore,
     workspaces,
+    onGoalChanged,
   });
 
   registerAppTool(
@@ -847,6 +851,7 @@ export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
   authMode?: ServerAuthMode;
   requestObserver?: RequestObserver;
+  onGoalChanged?: () => void;
 }
 
 export function createServer(
@@ -902,6 +907,7 @@ export function createServer(
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
       toolActivities.track,
+      options.onGoalChanged,
     );
   });
   const logMcpHandlerError = (error: Error) => logEvent(

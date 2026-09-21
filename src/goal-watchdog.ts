@@ -163,6 +163,21 @@ export class GoalContinuationWatchdog {
       return { goalId: goal.id, kind: "blocked", reason: decision.reason };
     }
 
+    // A Goal can be paused/cancelled or moved behind an approval gate after the continuation
+    // claim but before browser I/O starts. Re-read durable state so a stale claim never causes one
+    // extra ChatGPT message after the user has stopped automatic continuation.
+    const sendGuard = this.goalStore.requireGoal(goal.id);
+    if (sendGuard.status !== "running" && sendGuard.status !== "verifying") {
+      return { goalId: goal.id, kind: "blocked", reason: `status:${sendGuard.status}` };
+    }
+    if (
+      sendGuard.leaseOwner !== this.ownerId
+      || sendGuard.lastResumeNonce !== decision.nonce
+      || !sendGuard.pendingResume
+    ) {
+      return { goalId: goal.id, kind: "busy" };
+    }
+
     const rotation = snapshot.state === "conversation_limit";
     const prompt = rotation
       ? goalResumePrompt(decision)
