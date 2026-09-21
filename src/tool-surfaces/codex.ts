@@ -23,10 +23,11 @@ import {
   captureWorkspaceTaskSnapshot,
   readWorkspaceDelta,
 } from "../workspace-delta.js";
+import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. In a continued Chat or attached Goal, workspace_turn may omit workspace_id when the server can resolve exactly one current workspace; if resolution is ambiguous it fails closed and you must provide an explicit id. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -276,7 +277,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .max(MAX_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait before returning a running session. Defaults to 10000, maximum 12000. Use write_stdin for work that runs longer.",
+            "Milliseconds to wait before returning a running session. Defaults to 2000 for faster feedback on long commands, maximum 12000. Use write_stdin for work that runs longer.",
           ),
         max_output_tokens: z
           .number()
@@ -429,16 +430,21 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
 }
 
 function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
-  const { server, config, workspaces, processSessions } = context;
+  const { server, config, workspaces, processSessions, resolveWorkspaceIdForConversation } = context;
 
   server.registerTool(
     "workspace_turn",
     {
       title: "Workspace turn",
       description:
-        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Combine independent reads, short commands, process polls, task checkpoints, and checkpoint deltas after open_workspace. Each step returns its model-readable result. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
+        "Execute a small ordered batch of already-planned workspace operations in one MCP round trip. Combine independent reads, short commands, process polls, task checkpoints, and checkpoint deltas. workspace_id may be omitted only when the current Chat is unambiguously bound to one active Goal/workspace; otherwise open_workspace first or provide it explicitly. Each step returns its model-readable result. Keep adaptive decisions in the host: if one result determines what to do next, return and reason before sending another turn.",
       inputSchema: {
-        workspace_id: z.string().describe(workspaceIdDescription),
+        workspace_id: z
+          .string()
+          .optional()
+          .describe(
+            "Workspace to use. Omit only when this Chat is already unambiguously bound to one active Goal/workspace; otherwise provide the workspace_id returned by open_workspace.",
+          ),
         operations: z
           .array(workspaceTurnOperationSchema)
           .min(1)
@@ -459,6 +465,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           ),
       },
       outputSchema: resultOutputSchema({
+        workspace_id: z.string(),
         completed: z.number().int().nonnegative(),
         requested: z.number().int().positive(),
         stopped_early: z.boolean(),
@@ -487,9 +494,23 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       }),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspace_id, operations, stop_on_error, max_result_chars }) => {
+    async ({ workspace_id, operations, stop_on_error, max_result_chars }, { _meta }) => {
       const startedAt = performance.now();
-      const workspaceId = workspace_id;
+      let workspaceId = workspace_id;
+      if (!workspaceId) {
+        const conversationScopeId = conversationScopeIdFromRequestMeta(_meta);
+        if (!conversationScopeId || !resolveWorkspaceIdForConversation) {
+          throw new Error(
+            "workspace_turn requires workspace_id unless the current Chat is already bound to one active Goal/workspace. Call open_workspace first or provide workspace_id explicitly.",
+          );
+        }
+        workspaceId = await resolveWorkspaceIdForConversation(conversationScopeId);
+        if (!workspaceId) {
+          throw new Error(
+            "No active workspace is bound to this Chat. Call open_workspace first or provide workspace_id explicitly.",
+          );
+        }
+      }
       const stopOnError = stop_on_error ?? true;
       const workspace = await workspaces.getWorkspace(workspaceId);
       const steps: WorkspaceTurnStep[] = [];
@@ -672,6 +693,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
         content: [textBlock(result)],
         structuredContent: {
           result,
+          workspace_id: workspaceId,
           completed: steps.length,
           requested: operations.length,
           stopped_early: stoppedEarly,

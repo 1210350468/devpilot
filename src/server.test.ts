@@ -131,6 +131,9 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
 
     assert.equal(yieldSchema?.maximum, 12_000);
     assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
+    if (toolName === "exec_command") {
+      assert.match(yieldSchema?.description ?? "", /defaults to 2000/i);
+    }
   }
 });
 
@@ -168,6 +171,66 @@ test("workspace_turn batches reads and commands in one Codex tool call", async (
   assert.match(rendered, /Workspace turn completed 2\/2 operation/);
   assert.doesNotMatch(rendered, /batch-read/);
   assert.doesNotMatch(rendered, /batch-command/);
+});
+
+test("workspace_turn resolves the only workspace bound to the current Chat", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-auto"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  await writeFile(join(context.project, "auto.txt"), "auto-workspace\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      operations: [{ kind: "read", path: "auto.txt" }],
+    },
+    _meta: { "openai/session": "workspace-turn-auto" },
+  } as Parameters<Client["callTool"]>[0]);
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.workspace_id, workspaceId);
+  assert.match(String((structured.steps as Array<Record<string, unknown>>)[0]?.result), /auto-workspace/);
+});
+
+test("an active Goal resolves workspace_turn even when the Chat has multiple workspace bindings", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const conversationScopeId = "workspace-turn-goal-auto";
+  const first = structuredContent(
+    await callOpen(context.client, context.project, conversationScopeId),
+  );
+  const firstWorkspaceId = first.workspace_id;
+  assert.equal(typeof firstWorkspaceId, "string");
+
+  const otherProject = join(context.project, "..", "other-project");
+  await mkdir(otherProject);
+  await writeFile(join(otherProject, "AGENTS.md"), "other project instructions\n");
+  const second = structuredContent(await callOpen(context.client, otherProject, conversationScopeId));
+  assert.notEqual(second.workspace_id, firstWorkspaceId);
+
+  await callGoal(context.client, {
+    action: "start",
+    workspace_id: firstWorkspaceId,
+    objective: "Keep workspace_turn on the Goal workspace.",
+    criteria: [{ id: "done", description: "Resolver test completes." }],
+  }, conversationScopeId);
+  await writeFile(join(context.project, "goal-auto.txt"), "goal-workspace\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      operations: [{ kind: "read", path: "goal-auto.txt" }],
+    },
+    _meta: { "openai/session": conversationScopeId },
+  } as Parameters<Client["callTool"]>[0]);
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.workspace_id, firstWorkspaceId);
+  assert.match(String((structured.steps as Array<Record<string, unknown>>)[0]?.result), /goal-workspace/);
 });
 
 test("workspace_turn fairly bounds aggregate model-readable result context", async (t) => {

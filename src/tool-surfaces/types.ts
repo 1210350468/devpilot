@@ -78,6 +78,7 @@ export interface ToolRegistrationContext {
   config: ServerConfig;
   workspaces: WorkspaceRegistry;
   processSessions: ProcessSessionManager;
+  resolveWorkspaceIdForConversation?: (conversationScopeId: string) => Promise<string | undefined>;
 }
 
 export interface ToolInstructionContext {

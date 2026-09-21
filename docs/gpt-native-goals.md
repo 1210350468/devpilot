@@ -160,6 +160,13 @@ Cross-chat rotation: the test harness forced only the browser-inspection result 
 
 Neither E2E modified project files or production runtime state.
 
+For subsequent Goal turns, `workspace_turn` can also resolve the Goal's durable
+workspace from the current OpenAI conversation metadata. This removes a common
+`open_workspace → model → workspace_turn` round trip after a Goal has already
+been attached. Outside Goal mode the same shortcut is allowed only when a Chat
+has exactly one active workspace binding; multiple bindings fail closed and
+require an explicit workspace id.
+
 ## ChatGPT plugin schema refresh
 
 The first real web continuation exposed a host cache boundary: the existing `devpilot_pwc_openai` development plugin still advertised its legacy seven-tool schema even though raw `57681/mcp` already returned the new `goal` tool and the PWC v2 `workspace_turn` schema. The GPT correctly refused to invent a `goal` call.

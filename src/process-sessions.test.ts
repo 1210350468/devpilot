@@ -86,6 +86,25 @@ assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
 assert.match(completed.output, /finished/);
 
+const defaultLongStartedAt = Date.now();
+const defaultLong = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => process.exit(0), 10000)"`,
+});
+const defaultLongElapsedMs = Date.now() - defaultLongStartedAt;
+assert.equal(defaultLong.running, true);
+assert.ok(defaultLong.sessionId);
+assert.ok(
+  defaultLong.wallTimeMs >= 1_500,
+  `default long-command yield returned too early: ${defaultLong.wallTimeMs}ms`,
+);
+assert.ok(
+  defaultLongElapsedMs < 5_000,
+  `default long-command feedback was too slow: ${defaultLongElapsedMs}ms`,
+);
+manager.terminate("workspace-a", defaultLong.sessionId);
+
 const interactive = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

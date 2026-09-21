@@ -15,6 +15,8 @@
 - Validate a real ChatGPT Web same-conversation continuation through the experimental OpenAI Secure MCP Tunnel: Watchdog `GOAL_CONTINUE` → GPT `goal status` with `resume_nonce` → criterion verification → `goal finish`, with the original persisted workspace retained and no project-file changes.
 - Validate a real cross-conversation recovery path: a forced conversation-limit boundary created a new normal ChatGPT conversation, sent `GOAL_RESUME`, and the new GPT turn used `goal attach` with the nonce before verifying and finishing against the same workspace session.
 - Confirm and document ChatGPT plugin schema caching: an existing `devpilot_pwc_openai` connector continued exposing the legacy seven-tool schema until its development plugin was refreshed; the refresh triggered fresh `tools/list` / `server/discover`, after which a new Chat saw and successfully called the top-level `goal` tool.
+- Reduce the default Codex `exec_command` yield from 10 seconds to 2 seconds so long builds/tests hand control back to ChatGPT quickly with a process session id; explicit callers may still request up to the existing 12-second maximum.
+- Allow `workspace_turn` to omit `workspace_id` when the current Chat resolves unambiguously to one workspace. An attached non-terminal Goal takes precedence, ordinary multi-workspace Chats fail closed, and the resolved id is returned in structured output for later explicit tool calls.
 
 - Cache conversation-scoped workspace bootstrap context so repeated `open_workspace` calls do not recursively rediscover AGENTS / CLAUDE files unless `refresh_context=true` is requested.
 - Add Codex `workspace_turn` batching for up to eight ordered reads, short commands, or process polls in one MCP round trip.

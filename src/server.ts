@@ -743,6 +743,13 @@ function registerMcpSurface(
     config,
     workspaces,
     processSessions,
+    resolveWorkspaceIdForConversation: async (conversationScopeId) => {
+      const goal = goalStore.getGoalForConversation(conversationScopeId);
+      if (goal && !["succeeded", "failed", "cancelled"].includes(goal.status)) {
+        return goal.workspaceSessionId;
+      }
+      return await workspaces.resolveUniqueConversationWorkspaceId(conversationScopeId);
+    },
   });
 
   registerGoalTool({

@@ -80,6 +80,26 @@ test("conversation bindings distinguish canonical projects", async (t) => {
   assert.notEqual(otherProjectOpen.workspace.id, firstProjectOpen.workspace.id);
 });
 
+test("conversation workspace auto-resolution succeeds only when unambiguous", async (t) => {
+  const { root, project, registry } = await fixture(t);
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-auto" });
+  assert.equal(
+    await registry.resolveUniqueConversationWorkspaceId("chat-auto"),
+    first.workspace.id,
+  );
+  assert.equal(await registry.resolveUniqueConversationWorkspaceId("chat-missing"), undefined);
+
+  const otherProject = join(root, "other-project");
+  await mkdir(otherProject);
+  await writeFile(join(otherProject, "AGENTS.md"), "other project instructions\n");
+  const second = await registry.openWorkspace(otherProject, { conversationScopeId: "chat-auto" });
+  assert.notEqual(second.workspace.id, first.workspace.id);
+  await assert.rejects(
+    registry.resolveUniqueConversationWorkspaceId("chat-auto"),
+    /multiple active workspaces.*provide workspace_id explicitly/i,
+  );
+});
+
 test("concurrent checkout opens reuse one workspace and return matching context", async (t) => {
   const { project, registry } = await fixture(t);
 

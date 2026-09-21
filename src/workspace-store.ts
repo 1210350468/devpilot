@@ -87,6 +87,7 @@ export interface WorkspaceStore {
     conversationScopeId: string,
     targetKey: string,
   ): WorkspaceConversationBinding | undefined;
+  listConversationBindings(conversationScopeId: string): WorkspaceConversationBinding[];
   setConversationBinding(input: {
     conversationScopeId: string;
     targetKey: string;
@@ -263,6 +264,15 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .get();
 
     return row ? rowToWorkspaceConversationBinding(row) : undefined;
+  }
+
+  listConversationBindings(conversationScopeId: string): WorkspaceConversationBinding[] {
+    return this.database.db
+      .select()
+      .from(workspaceConversationBindings)
+      .where(eq(workspaceConversationBindings.conversationScopeId, conversationScopeId))
+      .all()
+      .map(rowToWorkspaceConversationBinding);
   }
 
   setConversationBinding(input: {

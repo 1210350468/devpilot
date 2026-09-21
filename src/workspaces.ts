@@ -339,6 +339,38 @@ export class WorkspaceRegistry {
     return restoredWorkspace;
   }
 
+  async resolveUniqueConversationWorkspaceId(conversationScopeId: string): Promise<string | undefined> {
+    if (!this.store) return undefined;
+    const workspaceIds = Array.from(new Set(
+      this.store.listConversationBindings(conversationScopeId)
+        .map((binding) => binding.workspaceSessionId),
+    ));
+    const activeWorkspaceIds: string[] = [];
+    for (const workspaceId of workspaceIds) {
+      const session = this.store.getSession(workspaceId);
+      if (!session || session.status !== "active") continue;
+      try {
+        await this.getWorkspace(workspaceId);
+        activeWorkspaceIds.push(workspaceId);
+      } catch (error) {
+        if (
+          error instanceof AccessDeniedError
+          || (isErrnoException(error) && (error.code === "ENOENT" || error.code === "ENOTDIR"))
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (activeWorkspaceIds.length === 0) return undefined;
+    if (activeWorkspaceIds.length > 1) {
+      throw new Error(
+        `Conversation is bound to multiple active workspaces (${activeWorkspaceIds.join(", ")}); provide workspace_id explicitly.`,
+      );
+    }
+    return activeWorkspaceIds[0];
+  }
+
   private async ensurePrunedWorkspaceRestored(
     session: WorkspaceSession,
   ): Promise<BetterResult<void, ManagedWorktreeFeatureError>> {
