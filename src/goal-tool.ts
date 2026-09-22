@@ -206,6 +206,10 @@ export function registerGoalTool(input: {
                 goal_updated_at: context.goalUpdatedAt,
                 derived: true,
               };
+              const priorResult = typeof structuredContent.result === "string"
+                ? structuredContent.result
+                : "Goal operation completed.";
+              structuredContent.result = `${priorResult} Recovery context: ${context.hydrateRef} (manifest: ${context.manifestRef}).`;
               response.content.push(textBlock(
                 `Recovery context cache: read ${context.hydrateRef} first; expand through ${context.manifestRef} only when the current step needs more context. The cache is derived; Goal DB and workspace Git/filesystem remain authoritative.`,
               ));

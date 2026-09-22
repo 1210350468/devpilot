@@ -122,6 +122,7 @@ test("Goal responses advertise bounded recovery context readable through read an
   assert.equal(recoveryContext.manifest_ref, `@context/${goalId}/manifest.md`);
   assert.equal(recoveryContext.derived, true);
   assert.equal(typeof recoveryContext.generated_at, "string");
+  assert.match(String(started.result), new RegExp(`Recovery context: @context/${goalId}/hydrate\\.md`));
   assert.match(JSON.stringify(startedResponse.content), new RegExp(`@context/${goalId}/hydrate\\.md`));
 
   await callGoal(context.client, {
