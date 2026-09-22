@@ -107,7 +107,8 @@ export class GoalContextStore {
     events: readonly GoalEvent[],
     options: GoalContextRefreshOptions = {},
   ): Promise<GoalContextSnapshot> {
-    const generatedAt = latestSourceTimestamp(goal, events);
+    const sourceRevisionAt = latestSourceTimestamp(goal, events);
+    const generatedAt = new Date().toISOString();
     const profile = chooseHydrationProfile(goal);
     const directory = goalContextDirectory(this.stateDir, goal.workspaceSessionId, goal.id);
     await mkdir(directory, { recursive: true });
@@ -117,7 +118,7 @@ export class GoalContextStore {
       ? await buildProjectMarkdownIndex(options.workspaceRoot, goal, this.projectMarkdownCache)
       : undefined;
     const documents = buildGoalContextDocuments(goal, events.slice(-HISTORY_MAX_EVENTS), {
-      generatedAt,
+      generatedAt: sourceRevisionAt,
       profile,
       refs,
       projectDocs,
@@ -749,7 +750,7 @@ function renderHistory(goal: PersistentGoal, events: readonly GoalEvent[], gener
 function authorityBanner(goal: PersistentGoal, generatedAt: string): string {
   return [
     "> **Derived recovery cache — not authoritative.** Goal DB is Goal truth; Git/filesystem is workspace truth.",
-    `> Goal: \`${goal.id}\` · Workspace: \`${goal.workspaceSessionId}\` · Goal updated: ${goal.updatedAt} · Cache generated: ${generatedAt}`,
+    `> Goal: \`${goal.id}\` · Workspace: \`${goal.workspaceSessionId}\` · Goal updated: ${goal.updatedAt} · Source revision: ${generatedAt}`,
   ].join("\n");
 }
 

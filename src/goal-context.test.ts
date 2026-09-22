@@ -19,12 +19,15 @@ test("Goal context store writes bounded derived Markdown recovery files", async 
   const snapshot = await store.refresh(goal, fixtureEvents());
 
   assert.equal(snapshot.profile, "verification");
+  assert.ok(Date.parse(snapshot.generatedAt) >= Date.parse(goal.updatedAt));
   assert.equal(snapshot.hydrateRef, `@context/${goal.id}/hydrate.md`);
   const readPath = resolveGoalContextReadPath(stateDir, goal.workspaceSessionId, snapshot.hydrateRef);
   assert.ok(readPath);
   const hydrate = await readFile(readPath.absolutePath, "utf8");
   assert.ok(hydrate.length <= 12_000);
   assert.match(hydrate, /Derived recovery cache — not authoritative/);
+  assert.match(hydrate, /Source revision:/);
+  assert.doesNotMatch(hydrate, /Cache generated:/);
   assert.match(hydrate, /Do not touch production/);
   assert.match(hydrate, /Run release verification/);
   assert.match(hydrate, /Focused suite passed/);
