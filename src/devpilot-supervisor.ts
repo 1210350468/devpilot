@@ -17,6 +17,7 @@ import { terminateProcessTree } from "./process-platform.js";
 import { createServer } from "./server.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { RequestObserver } from "./request-observer.js";
+import { acquireTunnelLease, type TunnelLease } from "./tunnel-lease.js";
 import { loadDevspaceFiles, setDevspaceConfigValues } from "./user-config.js";
 
 const OPENAI_TUNNEL_ID = /^tunnel_[0-9a-f]{32}$/;
@@ -27,6 +28,7 @@ const DEFAULT_HEALTH_ADDR = "127.0.0.1:47683";
 const DEFAULT_START_TIMEOUT_MS = 30_000;
 const DEFAULT_PUBLIC_PROBE_TIMEOUT_MS = 15_000;
 const UI_BUILD_DIRECTORY = fileURLToPath(new URL("./ui/", import.meta.url));
+const DEV_PILOT_PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 export type DevPilotTunnelProvider = "none" | "cloudflare-quick" | "openai-secure";
 export type ServiceState = "stopped" | "starting" | "running" | "stopping" | "error";
@@ -100,6 +102,7 @@ export class DevPilotSupervisor {
   private serverHttp?: Server;
   private serverStatus: ServiceStatus = { state: "stopped" };
   private tunnelProcess?: ChildProcessWithoutNullStreams;
+  private tunnelLease?: TunnelLease;
   private tunnelPublicBaseUrl?: string;
   private cloudflarePublicReady = false;
   private tunnelStatus: ServiceStatus = { state: "stopped" };
@@ -241,6 +244,7 @@ export class DevPilotSupervisor {
     this.pushEvent("info", this.config.tunnelProvider === "cloudflare-quick"
       ? "Starting Cloudflare Quick Tunnel."
       : `Starting OpenAI Secure MCP Tunnel ${this.config.tunnelId}.`);
+    let acquiredLease: TunnelLease | undefined;
     try {
       if (this.config.tunnelProvider === "cloudflare-quick") {
         this.cloudflarePublicReady = false;
@@ -264,6 +268,13 @@ export class DevPilotSupervisor {
         return;
       }
 
+      acquiredLease = await acquireTunnelLease({
+        tunnelId: this.config.tunnelId!,
+        projectRoot: DEV_PILOT_PROJECT_ROOT,
+        controlPort: this.config.port,
+        mcpPort: this.serverConfig.port,
+      });
+      this.tunnelLease = acquiredLease;
       const child = await spawnOpenAiSecureTunnel({
         command: this.config.tunnelClientCommand,
         tunnelId: this.config.tunnelId!,
@@ -278,11 +289,16 @@ export class DevPilotSupervisor {
       child.once("exit", (code, signal) => {
         if (this.tunnelProcess !== child) return;
         this.tunnelProcess = undefined;
+        const lease = this.tunnelLease;
+        this.tunnelLease = undefined;
+        if (lease && lease === acquiredLease) void lease.release().catch(() => undefined);
         this.tunnelStatus = { state: "error", error: `tunnel-client exited (${signal ?? code ?? "unknown"}).` };
         this.pushEvent("error", this.tunnelStatus.error!);
       });
       this.pushEvent("info", "OpenAI Secure MCP Tunnel is READY.");
     } catch (error) {
+      if (acquiredLease && this.tunnelLease === acquiredLease) this.tunnelLease = undefined;
+      await acquiredLease?.release().catch(() => undefined);
       this.tunnelStatus = { state: "error", error: errorMessage(error) };
       this.pushEvent("error", `Tunnel start failed: ${errorMessage(error)}`);
       throw error;
@@ -291,7 +307,10 @@ export class DevPilotSupervisor {
 
   async stopTunnel(): Promise<void> {
     const child = this.tunnelProcess;
+    const lease = this.tunnelLease;
+    this.tunnelLease = undefined;
     if (!child) {
+      await lease?.release().catch(() => undefined);
       this.tunnelPublicBaseUrl = undefined;
       this.cloudflarePublicReady = false;
       this.tunnelStatus = { state: "stopped" };
@@ -301,6 +320,7 @@ export class DevPilotSupervisor {
     this.tunnelProcess = undefined;
     terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
     await waitForChildExit(child, 5_000);
+    await lease?.release().catch(() => undefined);
     this.tunnelPublicBaseUrl = undefined;
     this.cloudflarePublicReady = false;
     this.tunnelStatus = { state: "stopped" };

@@ -1,5 +1,7 @@
 # Changelog
 
+- Prevent one OpenAI Secure Tunnel ID from being consumed by multiple live DevPilot backends via a machine-local tunnel lease, and stop ambient tunnel-config overrides from silently making different checkouts share the same Tunnel ID. Launcher startup now fails fast on tunnel errors instead of waiting the full READY timeout.
+
 ## Unreleased — Persistent Workspace Channel v2
 
 - Start the GPT-native Persistent Goal runtime as the next PWC slice. A new top-level `goal` MCP tool persists objective, acceptance criteria, evidence, compact resume state, cross-conversation attachments, and an append-only event journal in the existing DevPilot SQLite database; the ChatGPT host remains the reasoning agent and no local model is required.

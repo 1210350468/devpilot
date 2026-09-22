@@ -197,7 +197,8 @@ DevPilot / DevSpace 能让远程 MCP Host 在允许的本地 Workspace 中读取
 - 只将可信目录加入 `allowedRoots`。
 - Shell/Process 不是完整沙箱。
 - 不要提交 `.devpilot-config/`、`.devpilot-runtime/`、Runtime API Key、OAuth Token 或其他凭据。
-- 一个 Secure Tunnel ID 不应同时由多个本地 tunnel-client 消费。
+- 一个 Secure Tunnel ID 不应同时由多个本地 tunnel-client 消费。DevPilot Supervisor 会为 Secure Tunnel 获取本机唯一 lease；第二个 DevPilot backend 使用同一 Tunnel ID 时会 fail-closed，而不是让 ChatGPT 请求随机落到不同 workspace 状态。
+- 启动脚本默认只读取当前 checkout 的 `.devpilot-config/openai-tunnel.json`，不会再静默继承 ambient `DEVPILOT_OPENAI_TUNNEL_CONFIG`。如确实需要外部 Tunnel 配置，使用 `-OpenAiTunnelConfig <path>` 显式传入。
 - Control Center 默认只监听 loopback。
 
 ## 开发与发布门

@@ -1,6 +1,7 @@
 ﻿param(
   [ValidateSet("cloudflare-quick", "openai-secure")]
   [string]$TunnelProvider,
+  [string]$OpenAiTunnelConfig,
   [int]$McpPort = 47681,
   [int]$ControlPort = 47680,
   [int]$TunnelHealthPort = 47683,
@@ -15,7 +16,12 @@ $ToolsDir = Join-Path $ProjectRoot "tools"
 $ConfigPath = Join-Path $ConfigDir "config.jsonc"
 $LegacyConfigPath = Join-Path $ConfigDir "config.json"
 $AuthPath = Join-Path $ConfigDir "auth.json"
-$TunnelConfigPath = if ($env:DEVPILOT_OPENAI_TUNNEL_CONFIG) { $env:DEVPILOT_OPENAI_TUNNEL_CONFIG } else { Join-Path $ConfigDir "openai-tunnel.json" }
+$DefaultTunnelConfigPath = Join-Path $ConfigDir "openai-tunnel.json"
+$AmbientTunnelConfigPath = if ($env:DEVPILOT_OPENAI_TUNNEL_CONFIG) { [string]$env:DEVPILOT_OPENAI_TUNNEL_CONFIG } else { $null }
+$TunnelConfigPath = if ($OpenAiTunnelConfig) { [System.IO.Path]::GetFullPath($OpenAiTunnelConfig) } else { $DefaultTunnelConfigPath }
+if ($AmbientTunnelConfigPath -and -not $OpenAiTunnelConfig) {
+  Write-Host "[安全] 忽略 ambient DEVPILOT_OPENAI_TUNNEL_CONFIG=$AmbientTunnelConfigPath；默认只使用当前 DevPilot 的本地 Tunnel 配置。需要外部配置时请显式传 -OpenAiTunnelConfig。" -ForegroundColor Yellow
+}
 $RuntimePath = Join-Path $RuntimeDir "runtime.json"
 $InfoPath = Join-Path $ProjectRoot "DevPilot-connection.txt"
 $StdoutPath = Join-Path $RuntimeDir "devpilot.out.log"
@@ -381,6 +387,7 @@ $env:DEVPILOT_OPENAI_TUNNEL_ID = $null
 $env:DEVPILOT_OPENAI_TUNNEL_API_KEY = $null
 $env:DEVPILOT_OPENAI_TUNNEL_HEALTH_ADDR = $null
 $env:DEVPILOT_OPENAI_CONTROL_PLANE_PROXY = $null
+$env:DEVPILOT_OPENAI_TUNNEL_CONFIG = $null
 
 $tunnelId = $null
 $controlPlaneProxy = $null
@@ -442,6 +449,7 @@ while ((Get-Date) -lt $deadline) {
   }
   $status = Test-ControlApi
   if (-not $status) { continue }
+  if ($status.tunnel.state -eq "error") { break }
   if ($status.server.status -eq "online" -and $status.tunnel.provider -eq $TunnelProvider -and $status.tunnel.ready -eq $true) { break }
 }
 
@@ -449,6 +457,8 @@ $ready = $status -and $status.server.status -eq "online" -and $status.tunnel.pro
 if (-not $ready) {
   try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
   $detail = if (Test-Path $StderrPath) { Get-Content -Raw -Encoding UTF8 $StderrPath } else { "" }
+  $tunnelError = if ($status -and $status.tunnel -and $status.tunnel.error) { [string]$status.tunnel.error } else { "" }
+  if ($tunnelError) { throw "DevPilot Tunnel 启动失败：$tunnelError`n$detail" }
   throw "DevPilot 没有在 55 秒内进入 READY。请查看 $StderrPath`n$detail"
 }
 

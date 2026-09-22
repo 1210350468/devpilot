@@ -54,6 +54,10 @@ function testDevPilotStartLauncherPreservesLegacyConfig(): void {
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("McpPort"\)/);
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("ControlPort"\)/);
   assert.match(script, /\$PSBoundParameters\.ContainsKey\("TunnelHealthPort"\)/);
+  assert.match(script, /\[string\]\$OpenAiTunnelConfig/);
+  assert.match(script, /忽略 ambient DEVPILOT_OPENAI_TUNNEL_CONFIG/);
+  assert.match(script, /\$env:DEVPILOT_OPENAI_TUNNEL_CONFIG\s*=\s*\$null/);
+  assert.match(script, /\$status\.tunnel\.state -eq "error"/);
   assert.match(script, /workspace_turn \/ goal/);
 }
 
