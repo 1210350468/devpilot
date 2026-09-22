@@ -15,6 +15,7 @@ const PROJECT_DOC_MAX_FILES = 160;
 const PROJECT_DOC_MAX_DEPTH = 6;
 const PROJECT_DOC_MAX_HEADINGS_PER_FILE = 80;
 const PROJECT_DOC_SCAN_CHARS_PER_FILE = 1_000_000;
+const PROJECT_DOC_CANDIDATE_CACHE_TTL_MS = 5_000;
 const TRUNCATION_NOTICE = "\n\n[Derived recovery context truncated to its bounded context budget.]\n";
 
 const CONTEXT_FILES = new Set([
@@ -72,6 +73,20 @@ interface ProjectMarkdownIndex {
   truncated: boolean;
 }
 
+interface ProjectMarkdownCache {
+  candidates: Map<string, {
+    expiresAt: number;
+    paths: string[];
+    truncated: boolean;
+  }>;
+  headings: Map<string, {
+    bytes: number;
+    modifiedMs: number;
+    headings: ProjectMarkdownHeading[];
+    partial: boolean;
+  }>;
+}
+
 /**
  * Derived, bounded Markdown recovery cache for a durable Goal.
  *
@@ -80,6 +95,11 @@ interface ProjectMarkdownIndex {
  * addressable without replaying a Chat transcript.
  */
 export class GoalContextStore {
+  private readonly projectMarkdownCache: ProjectMarkdownCache = {
+    candidates: new Map(),
+    headings: new Map(),
+  };
+
   constructor(private readonly stateDir: string) {}
 
   async refresh(
@@ -94,7 +114,7 @@ export class GoalContextStore {
 
     const refs = goalContextRefs(goal.id);
     const projectDocs = options.workspaceRoot
-      ? await buildProjectMarkdownIndex(options.workspaceRoot, goal)
+      ? await buildProjectMarkdownIndex(options.workspaceRoot, goal, this.projectMarkdownCache)
       : undefined;
     const documents = buildGoalContextDocuments(goal, events.slice(-HISTORY_MAX_EVENTS), {
       generatedAt,
@@ -426,20 +446,52 @@ function projectLead(document: ProjectMarkdownDocument): string {
 async function buildProjectMarkdownIndex(
   workspaceRoot: string,
   goal: PersistentGoal,
+  cache: ProjectMarkdownCache,
 ): Promise<ProjectMarkdownIndex> {
   const root = resolve(workspaceRoot);
-  const candidates: string[] = [];
-  let truncated = false;
-  await walkMarkdown(root, root, 0, candidates, () => { truncated = true; });
+  const now = Date.now();
+  const cachedCandidates = cache.candidates.get(root);
+  let candidates: string[];
+  let truncated: boolean;
+  if (cachedCandidates && cachedCandidates.expiresAt > now) {
+    candidates = cachedCandidates.paths;
+    truncated = cachedCandidates.truncated;
+  } else {
+    candidates = [];
+    truncated = false;
+    await walkMarkdown(root, root, 0, candidates, () => { truncated = true; });
+    cache.candidates.set(root, {
+      expiresAt: now + PROJECT_DOC_CANDIDATE_CACHE_TTL_MS,
+      paths: candidates,
+      truncated,
+    });
+  }
   const terms = goalSearchTerms(goal);
   const documents: ProjectMarkdownDocument[] = [];
   let indexedBytes = 0;
+  const activePaths = new Set(candidates);
   for (const absolutePath of candidates) {
     try {
       const info = await stat(absolutePath);
       if (!info.isFile()) continue;
       const path = normalizeRelativePath(relative(root, absolutePath));
-      const headingScan = await scanMarkdownHeadings(absolutePath);
+      const cachedHeadingScan = cache.headings.get(absolutePath);
+      const headingScan = cachedHeadingScan
+        && cachedHeadingScan.bytes === info.size
+        && cachedHeadingScan.modifiedMs === info.mtimeMs
+        ? {
+            headings: cachedHeadingScan.headings,
+            partial: cachedHeadingScan.partial,
+          }
+        : await scanMarkdownHeadings(absolutePath);
+      if (headingScan !== cachedHeadingScan) {
+        cache.headings.set(absolutePath, {
+          bytes: info.size,
+          modifiedMs: info.mtimeMs,
+          headings: headingScan.headings,
+          partial: headingScan.partial,
+        });
+      }
       const score = scoreProjectDocument(path, headingScan.headings, terms);
       documents.push({
         path,
@@ -452,6 +504,11 @@ async function buildProjectMarkdownIndex(
       indexedBytes += info.size;
     } catch {
       // Derived project-document indexing is best effort. Source reads remain authoritative.
+    }
+  }
+  for (const cachedPath of cache.headings.keys()) {
+    if (cachedPath.startsWith(`${root}\\`) || cachedPath.startsWith(`${root}/`)) {
+      if (!activePaths.has(cachedPath)) cache.headings.delete(cachedPath);
     }
   }
   documents.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));

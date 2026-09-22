@@ -217,6 +217,30 @@ test("multi-megabyte Markdown source stays external while hydration remains boun
   assert.ok(!hydrate.includes(body.slice(0, 10_000)));
 });
 
+test("project Markdown cache reparses an existing source when size or mtime changes", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-context-cache-state-"));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "devspace-goal-context-cache-root-"));
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+  const sourcePath = join(workspaceRoot, "context.md");
+  await writeFile(sourcePath, "# Initial Heading\nInitial body.\n");
+  const goal = fixtureGoal();
+  const store = new GoalContextStore(stateDir);
+  await store.refresh(goal, [], { workspaceRoot });
+  const refs = goalContextRefs(goal.id);
+  const projectIndexPath = resolveGoalContextReadPath(stateDir, goal.workspaceSessionId, refs.projectDocs);
+  assert.ok(projectIndexPath);
+  assert.match(await readFile(projectIndexPath.absolutePath, "utf8"), /Initial Heading/);
+
+  await writeFile(sourcePath, "# Updated Heading With Different Size\nUpdated body with more content.\n");
+  await store.refresh(goal, [], { workspaceRoot });
+  const refreshed = await readFile(projectIndexPath.absolutePath, "utf8");
+  assert.match(refreshed, /Updated Heading With Different Size/);
+  assert.doesNotMatch(refreshed, /Initial Heading/);
+});
+
 function fixtureGoal(): PersistentGoal {
   return {
     id: "goal_context_test",

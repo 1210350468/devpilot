@@ -85,6 +85,8 @@ Long project notes, handoffs, research logs, and pasted Markdown are indexed wit
 
 The source Markdown remains the authority. A recovery turn should use the index to choose a source path and heading line, then call the normal workspace `read` around that location. This means a project may accumulate multi-megabyte or larger Markdown material without every rotated Chat reading the entire handoff corpus. Hidden directories, runtime/config state, dependency/build outputs, and other noisy generated trees are excluded from the scan; file count, recursion depth, headings per file, and per-file heading-scan characters are all bounded.
 
+Within one running Goal tool surface, Markdown discovery is cached for a short five-second window so several Goal operations in the same host turn do not repeatedly walk a large workspace tree. Heading parses are cached by source path plus byte size and modification time; edits to an existing source invalidate its heading cache on the next refresh. The cache is only an acceleration layer and is discarded with the process.
+
 ## Staleness and invalidation
 
 The cache is refreshed from the latest Goal record and bounded Goal events whenever the Goal MCP surface is used. Generated Markdown includes the Goal update/source version and an explicit non-authoritative banner.
