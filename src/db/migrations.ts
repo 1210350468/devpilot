@@ -62,6 +62,11 @@ const migrations: Migration[] = [
     name: "goal-browser-bindings",
     up: migrateGoalBrowserBindings,
   },
+  {
+    version: 12,
+    name: "goal-progress-guards",
+    up: migrateGoalProgressGuards,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -422,9 +427,16 @@ function migrateGoalBrowserBindings(sqlite: Database.Database): void {
   `);
 }
 
+function migrateGoalProgressGuards(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "goals", "no_progress_rounds", "integer not null default 0");
+  addColumnIfMissing(sqlite, "goals", "same_failure_count", "integer not null default 0");
+  addColumnIfMissing(sqlite, "goals", "last_progress_signature", "text");
+  addColumnIfMissing(sqlite, "goals", "last_failure_signature", "text");
+}
+
 function addColumnIfMissing(
   sqlite: Database.Database,
-  table: "workspace_sessions" | "local_agent_sessions",
+  table: "workspace_sessions" | "local_agent_sessions" | "goals",
   column: string,
   definition: string,
 ): void {

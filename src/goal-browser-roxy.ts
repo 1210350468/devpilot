@@ -80,6 +80,7 @@ interface DomState {
   alertText: string;
   userTurns: number;
   assistantTurns: number;
+  visibleConversationChars: number;
 }
 
 export class AsterBridgeRoxyGoalBrowserAdapter implements GoalBrowserAdapter {
@@ -559,6 +560,9 @@ function snapshotFromDomState(state: DomState, targetId: string): GoalBrowserSna
   const common = {
     conversationUrl: state.url,
     conversationKey: targetId,
+    userTurns: state.userTurns,
+    assistantTurns: state.assistantTurns,
+    visibleConversationChars: state.visibleConversationChars,
   };
   if (state.loginRequired) return { state: "login_required", ...common, detail: state.alertText || undefined };
   if (state.offline) return { state: "disconnected", ...common };
@@ -641,6 +645,10 @@ function domStateExpression(): string {
     const draft = composer
       ? (('value' in composer ? composer.value : composer.innerText || composer.textContent || '') || '').trim()
       : '';
+    const userTurns = Array.from(document.querySelectorAll(${JSON.stringify(USER_TURN_SELECTOR)}));
+    const assistantTurns = Array.from(document.querySelectorAll(${JSON.stringify(ASSISTANT_TURN_SELECTOR)}));
+    const visibleConversationChars = [...userTurns, ...assistantTurns]
+      .reduce((total, element) => total + ((element.textContent || '').length), 0);
     return {
       url: location.href,
       composerVisible: Boolean(composer),
@@ -652,8 +660,9 @@ function domStateExpression(): string {
       terminalError,
       draftNonEmpty: draft.length > 0,
       alertText,
-      userTurns: document.querySelectorAll(${JSON.stringify(USER_TURN_SELECTOR)}).length,
-      assistantTurns: document.querySelectorAll(${JSON.stringify(ASSISTANT_TURN_SELECTOR)}).length,
+      userTurns: userTurns.length,
+      assistantTurns: assistantTurns.length,
+      visibleConversationChars,
     };
   })()`;
 }

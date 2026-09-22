@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -133,6 +133,88 @@ test("hydrate remains capped when a Goal has many large required criteria", asyn
   const hydrate = await readFile(readPath.absolutePath, "utf8");
   assert.ok(hydrate.length <= 12_000);
   assert.match(hydrate, /truncated to its bounded context budget/);
+});
+
+test("project Markdown hydration indexes paths and headings without copying source bodies", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-context-project-state-"));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "devspace-goal-context-project-root-"));
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+  await mkdir(join(workspaceRoot, "docs"), { recursive: true });
+  await writeFile(join(workspaceRoot, "docs", "persistent-context.md"), [
+    "# Persistent Context",
+    "body-sentinel-that-must-not-be-copied",
+    "## Adaptive Hydration",
+    "More body text.",
+    "## Rotation Pressure",
+  ].join("\n"));
+  await writeFile(join(workspaceRoot, "docs", "unrelated.md"), "# Cooking Notes\nNothing relevant.\n");
+
+  const goal: PersistentGoal = {
+    ...fixtureGoal(),
+    objective: "Improve persistent context adaptive hydration and rotation pressure.",
+    summary: "Index project Markdown for adaptive hydration.",
+  };
+  const store = new GoalContextStore(stateDir);
+  const snapshot = await store.refresh(goal, fixtureEvents(), { workspaceRoot });
+  const refs = goalContextRefs(goal.id);
+  const projectIndexPath = resolveGoalContextReadPath(stateDir, goal.workspaceSessionId, refs.projectDocs);
+  assert.ok(projectIndexPath);
+  const projectIndex = await readFile(projectIndexPath.absolutePath, "utf8");
+  assert.match(projectIndex, /docs\/persistent-context\.md/);
+  assert.match(projectIndex, /L1 # Persistent Context/);
+  assert.match(projectIndex, /L3 ## Adaptive Hydration/);
+  assert.doesNotMatch(projectIndex, /body-sentinel-that-must-not-be-copied/);
+
+  const hydratePath = resolveGoalContextReadPath(stateDir, goal.workspaceSessionId, snapshot.hydrateRef);
+  assert.ok(hydratePath);
+  const hydrate = await readFile(hydratePath.absolutePath, "utf8");
+  assert.match(hydrate, /Project Markdown leads/);
+  assert.match(hydrate, /docs\/persistent-context\.md/);
+  assert.doesNotMatch(hydrate, /body-sentinel-that-must-not-be-copied/);
+});
+
+test("multi-megabyte Markdown source stays external while hydration remains bounded", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-context-scale-state-"));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "devspace-goal-context-scale-root-"));
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+  await mkdir(join(workspaceRoot, "research"), { recursive: true });
+  const body = "x".repeat(550_000);
+  for (let index = 0; index < 8; index += 1) {
+    const heading = index === 7 ? "# Adaptive Context Million Scale Benchmark" : `# Archive ${index}`;
+    await writeFile(join(workspaceRoot, "research", `part-${index}.md`), `${heading}\n${body}\n`);
+  }
+
+  const goal: PersistentGoal = {
+    ...fixtureGoal(),
+    status: "running",
+    objective: "Run adaptive context million scale benchmark.",
+    summary: "Keep multi-megabyte Markdown external and hydrate only an index.",
+    currentStep: "Find the million scale benchmark document.",
+    nextStep: undefined,
+  };
+  const store = new GoalContextStore(stateDir);
+  const snapshot = await store.refresh(goal, [], { workspaceRoot });
+  const hydratePath = resolveGoalContextReadPath(stateDir, goal.workspaceSessionId, snapshot.hydrateRef);
+  const projectIndexPath = resolveGoalContextReadPath(
+    stateDir,
+    goal.workspaceSessionId,
+    goalContextRefs(goal.id).projectDocs,
+  );
+  assert.ok(hydratePath);
+  assert.ok(projectIndexPath);
+  const hydrate = await readFile(hydratePath.absolutePath, "utf8");
+  const projectIndex = await readFile(projectIndexPath.absolutePath, "utf8");
+  assert.ok(hydrate.length <= 12_000);
+  assert.ok(projectIndex.length <= 24_000);
+  assert.match(hydrate, /research\/part-7\.md/);
+  assert.match(projectIndex, /Indexed source bytes: 4[0-9]{6}/);
+  assert.ok(!hydrate.includes(body.slice(0, 10_000)));
 });
 
 function fixtureGoal(): PersistentGoal {

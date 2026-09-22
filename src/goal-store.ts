@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
@@ -127,8 +127,14 @@ export type GoalContinuationDecision =
   | {
       kind: "budget_exhausted";
       goal: PersistentGoal;
-      reason: "max_rounds" | "max_wall_time";
+      reason: GoalContinuationBudgetReason;
     };
+
+export type GoalContinuationBudgetReason =
+  | "max_rounds"
+  | "max_wall_time"
+  | "no_progress"
+  | "same_failure";
 
 export interface GoalCriterionInput {
   id: string;
@@ -507,6 +513,43 @@ export class GoalStore {
         return { kind: "budget_exhausted" as const, reason: "max_wall_time" as const };
       }
 
+      const criteriaRows = this.database.db.select().from(goalCriteria)
+        .where(eq(goalCriteria.goalId, row.id))
+        .all();
+      const progressSignature = continuationProgressSignature(row, criteriaRows);
+      const failureSignature = continuationFailureSignature(row);
+      const noProgressRounds = row.lastProgressSignature === progressSignature
+        ? row.noProgressRounds + 1
+        : 0;
+      const sameFailureCount = failureSignature
+        ? row.lastFailureSignature === failureSignature
+          ? row.sameFailureCount + 1
+          : 1
+        : 0;
+
+      this.database.db.update(goals).set({
+        noProgressRounds,
+        sameFailureCount,
+        lastProgressSignature: progressSignature,
+        lastFailureSignature: failureSignature ?? null,
+        updatedAt: nowIso,
+      }).where(eq(goals.id, row.id)).run();
+
+      if (noProgressRounds >= row.maxNoProgressRounds) {
+        this.markGoalBudgetExhausted(row.id, row.roundNumber, "no_progress", nowIso, {
+          noProgressRounds,
+          maxNoProgressRounds: row.maxNoProgressRounds,
+        });
+        return { kind: "budget_exhausted" as const, reason: "no_progress" as const };
+      }
+      if (sameFailureCount >= row.maxSameFailure) {
+        this.markGoalBudgetExhausted(row.id, row.roundNumber, "same_failure", nowIso, {
+          sameFailureCount,
+          maxSameFailure: row.maxSameFailure,
+        });
+        return { kind: "budget_exhausted" as const, reason: "same_failure" as const };
+      }
+
       const roundNumber = row.roundNumber + 1;
       const leaseUntil = new Date(nowMs + leaseMs).toISOString();
       this.database.db.update(goals).set({
@@ -633,8 +676,9 @@ export class GoalStore {
   private markGoalBudgetExhausted(
     goalId: string,
     roundNumber: number,
-    reason: "max_rounds" | "max_wall_time",
+    reason: GoalContinuationBudgetReason,
     now: string,
+    details: Record<string, unknown> = {},
   ): void {
     this.database.db.update(goals).set({
       status: "blocked",
@@ -643,7 +687,7 @@ export class GoalStore {
       pendingResume: "false",
       updatedAt: now,
     }).where(eq(goals.id, goalId)).run();
-    this.insertEvent(goalId, "budget_exhausted", roundNumber, { reason }, now);
+    this.insertEvent(goalId, "budget_exhausted", roundNumber, { reason, ...details }, now);
   }
 }
 
@@ -724,6 +768,39 @@ function rowToGoalBrowserBinding(row: GoalBrowserBindingRow): GoalBrowserBinding
     rotationCount: row.rotationCount,
     updatedAt: row.updatedAt,
   };
+}
+
+function continuationProgressSignature(row: GoalRow, criteriaRows: GoalCriterionRow[]): string {
+  const capsule = parseJsonObject(row.resumeCapsuleJson);
+  const criteria = [...criteriaRows]
+    .sort((left, right) => left.criterionId.localeCompare(right.criterionId))
+    .map((criterion) => ({
+      id: criterion.criterionId,
+      status: criterion.status,
+      evidence: parseJsonArray(criterion.evidenceJson),
+      verificationSource: criterion.verificationSource ?? null,
+      verificationTime: criterion.verificationTime ?? null,
+    }));
+  return stableHash({
+    summary: row.summary,
+    currentStep: row.currentStep ?? null,
+    nextStep: row.nextStep ?? null,
+    resumeCapsule: capsule,
+    criteria,
+  });
+}
+
+function continuationFailureSignature(row: GoalRow): string | undefined {
+  const capsule = parseJsonObject(row.resumeCapsuleJson) as GoalResumeCapsule;
+  const latest = [...(capsule.failures ?? [])]
+    .reverse()
+    .find((failure) => typeof failure === "string" && failure.trim().length > 0)
+    ?.trim();
+  return latest ? stableHash(latest) : undefined;
+}
+
+function stableHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function readGoalStatus(status: string): GoalStatus {

@@ -321,3 +321,169 @@ test("expired continuation leases can be taken over and budgets block further ro
   assert.equal(exhausted.reason, "max_rounds");
   assert.equal(exhausted.goal.status, "blocked");
 });
+
+test("no-progress guard blocks repeated unchanged continuation rounds", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_no_progress", root: "/tmp/no-progress", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_no_progress",
+    objective: "Stop if repeated continuation rounds make no durable progress.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+    budgets: { maxNoProgressRounds: 2, maxSameFailure: 99 },
+  });
+  const start = new Date("2026-09-20T00:00:00.000Z");
+
+  for (let index = 0; index < 2; index += 1) {
+    const nonce = `no_progress_${index}`;
+    const claimed = store.claimContinuation({
+      goalId: goal.id,
+      leaseOwner: "watchdog",
+      nonce,
+      now: new Date(start.getTime() + index * 2_000),
+    });
+    assert.equal(claimed.kind, "claimed");
+    store.releaseContinuation({
+      goalId: goal.id,
+      leaseOwner: "watchdog",
+      nonce,
+      now: new Date(start.getTime() + index * 2_000 + 1_000),
+    });
+  }
+
+  const exhausted = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "no_progress_2",
+    now: new Date(start.getTime() + 4_000),
+  });
+  assert.equal(exhausted.kind, "budget_exhausted");
+  if (exhausted.kind !== "budget_exhausted") throw new Error("Expected no-progress exhaustion.");
+  assert.equal(exhausted.reason, "no_progress");
+  assert.equal(exhausted.goal.status, "blocked");
+  assert.equal(store.listEvents(goal.id).at(-1)?.payload.reason, "no_progress");
+});
+
+test("durable Goal checkpoint progress resets the no-progress guard", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_progress_reset", root: "/tmp/progress-reset", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_progress_reset",
+    objective: "Reset the guard when durable state advances.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+    budgets: { maxNoProgressRounds: 2, maxSameFailure: 99 },
+  });
+  const start = new Date("2026-09-20T01:00:00.000Z");
+  for (let index = 0; index < 2; index += 1) {
+    const nonce = `progress_reset_${index}`;
+    assert.equal(store.claimContinuation({
+      goalId: goal.id,
+      leaseOwner: "watchdog",
+      nonce,
+      now: new Date(start.getTime() + index * 2_000),
+    }).kind, "claimed");
+    store.releaseContinuation({
+      goalId: goal.id,
+      leaseOwner: "watchdog",
+      nonce,
+      now: new Date(start.getTime() + index * 2_000 + 1_000),
+    });
+  }
+  store.updateGoal({
+    goalId: goal.id,
+    summary: "Implemented the next milestone.",
+    currentStep: "Verify the milestone.",
+    resumeCapsule: { currentState: "Implementation advanced after the previous round." },
+    eventKind: "checkpoint",
+  });
+  const advanced = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "progress_reset_2",
+    now: new Date(start.getTime() + 4_000),
+  });
+  assert.equal(advanced.kind, "claimed");
+  assert.equal(store.requireGoal(goal.id).status, "running");
+});
+
+test("same-failure guard blocks repeated failure even when other Goal state changes", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-goal-store-test-"));
+  const workspaceStore = new SqliteWorkspaceStore(stateDir);
+  workspaceStore.createSession({ id: "ws_same_failure", root: "/tmp/same-failure", mode: "checkout" });
+  const store = new GoalStore(stateDir);
+  t.after(async () => {
+    store.close();
+    workspaceStore.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const goal = store.createGoal({
+    workspaceSessionId: "ws_same_failure",
+    objective: "Stop retrying the same failed strategy forever.",
+    criteria: [{ id: "done", description: "Goal is done." }],
+    budgets: { maxNoProgressRounds: 99, maxSameFailure: 2 },
+  });
+  const start = new Date("2026-09-20T02:00:00.000Z");
+  const baseline = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "same_failure_0",
+    now: start,
+  });
+  assert.equal(baseline.kind, "claimed");
+  store.releaseContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "same_failure_0",
+    now: new Date(start.getTime() + 500),
+  });
+
+  store.updateGoal({
+    goalId: goal.id,
+    summary: "First attempt failed.",
+    resumeCapsule: { currentState: "Attempt one finished.", failures: ["network timeout"] },
+    eventKind: "checkpoint",
+  });
+  const firstFailure = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "same_failure_1",
+    now: new Date(start.getTime() + 1_000),
+  });
+  assert.equal(firstFailure.kind, "claimed");
+  store.releaseContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "same_failure_1",
+    now: new Date(start.getTime() + 1_500),
+  });
+
+  store.updateGoal({
+    goalId: goal.id,
+    summary: "Second attempt changed diagnostics but hit the same failure.",
+    resumeCapsule: { currentState: "Attempt two gathered more diagnostics.", failures: ["network timeout"] },
+    eventKind: "checkpoint",
+  });
+  const repeated = store.claimContinuation({
+    goalId: goal.id,
+    leaseOwner: "watchdog",
+    nonce: "same_failure_2",
+    now: new Date(start.getTime() + 2_000),
+  });
+  assert.equal(repeated.kind, "budget_exhausted");
+  if (repeated.kind !== "budget_exhausted") throw new Error("Expected same-failure exhaustion.");
+  assert.equal(repeated.reason, "same_failure");
+  assert.equal(repeated.goal.status, "blocked");
+});

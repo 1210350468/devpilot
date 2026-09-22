@@ -109,6 +109,12 @@ Long Goal recovery now adds a second bounded layer above the workspace checkpoin
 
 The normal recovery path is `Goal attach/status → hydrate.md → relevant topic file(s) → workspace delta/source reads`. `hydrate.md` is capped at 12k characters and chooses a deterministic minimal/normal/debug/verification profile. Topic files remain separately bounded, and `workspace_turn` still applies its aggregate result budget. The context cache never owns workspace facts: it is a derived acceleration index that may be discarded and regenerated. See `docs/persistent-context.md`.
 
+The same recovery layer now includes a bounded project Markdown heading index. It stores paths/headings/line numbers rather than source bodies, ranks likely documents against the current Goal, and lets the host jump into the authoritative source with focused `read` calls. A synthetic multi-megabyte Markdown regression keeps the first hydration under 12k characters and the project index under 24k while leaving the source corpus external.
+
+Goal browser continuation also supports proactive rotation based on observable DOM pressure (assistant turns, total visible turns, and visible conversation characters). It does not infer or fabricate token usage. Crossing a safety threshold while the page is idle takes the already-tested cross-Chat `GOAL_RESUME` path before a hard `conversation_limit` boundary is reached.
+
+The previously reserved Goal budgets for no-progress and repeated-failure handling are now enforced. New logical continuation rounds compare a fingerprint of durable Goal/criterion state with the previous round boundary and separately fingerprint the latest durable failure. Unchanged state or the same failed strategy blocks automatic continuation at the configured budget instead of allowing an infinite browser loop; idempotent retry of the same resume nonce is excluded from these counters.
+
 ### Host schema-cache compatibility
 
 The v2 experiment intentionally keeps the top-level Codex surface at seven tools. Real ChatGPT testing showed that changing only the nested `workspace_turn` operation union does not necessarily refresh an already-connected host's cached schema, even after the MCP server restarts and its own `tools/list` reports the new `checkpoint` and `delta` variants. A freshly discovered connector receives the server schema correctly. Treat this as a host-discovery compatibility boundary rather than a server-state failure; runtime validation therefore checks both the server's raw `tools/list` and the host-visible tool schema.

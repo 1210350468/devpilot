@@ -20,6 +20,9 @@ export interface GoalBrowserSnapshot {
   conversationUrl?: string;
   conversationKey?: string;
   detail?: string;
+  userTurns?: number;
+  assistantTurns?: number;
+  visibleConversationChars?: number;
 }
 
 export interface GoalBrowserSendResult {
@@ -51,7 +54,13 @@ export interface GoalBrowserAdapter {
 
 export type GoalWatchdogOutcome =
   | { goalId: string; kind: "sent_continue"; roundNumber: number; resumeNonce: string }
-  | { goalId: string; kind: "sent_resume"; roundNumber: number; resumeNonce: string }
+  | {
+      goalId: string;
+      kind: "sent_resume";
+      roundNumber: number;
+      resumeNonce: string;
+      reason: "conversation_limit" | "context_pressure";
+    }
   | { goalId: string; kind: "generating" }
   | { goalId: string; kind: "pending_ack" }
   | { goalId: string; kind: "busy" }
@@ -63,12 +72,26 @@ export interface GoalWatchdogOptions {
   ownerId?: string;
   leaseMs?: number;
   now?: () => Date;
+  rotationPressure?: Partial<GoalRotationPressureLimits>;
 }
+
+export interface GoalRotationPressureLimits {
+  maxAssistantTurns: number;
+  maxTotalTurns: number;
+  maxVisibleConversationChars: number;
+}
+
+export const DEFAULT_GOAL_ROTATION_PRESSURE: GoalRotationPressureLimits = {
+  maxAssistantTurns: 72,
+  maxTotalTurns: 140,
+  maxVisibleConversationChars: 600_000,
+};
 
 export class GoalContinuationWatchdog {
   readonly ownerId: string;
   private readonly leaseMs: number;
   private readonly now: () => Date;
+  private readonly rotationPressure: GoalRotationPressureLimits;
 
   constructor(
     private readonly goalStore: GoalStore,
@@ -78,6 +101,7 @@ export class GoalContinuationWatchdog {
     this.ownerId = options.ownerId ?? `goal_watchdog_${randomBytes(12).toString("base64url")}`;
     this.leaseMs = Math.max(5_000, Math.min(300_000, Math.floor(options.leaseMs ?? 60_000)));
     this.now = options.now ?? (() => new Date());
+    this.rotationPressure = normalizeRotationPressure(options.rotationPressure);
   }
 
   async tick(): Promise<GoalWatchdogOutcome[]> {
@@ -178,7 +202,11 @@ export class GoalContinuationWatchdog {
       return { goalId: goal.id, kind: "busy" };
     }
 
-    const rotation = snapshot.state === "conversation_limit";
+    const pressureReason = contextPressureReason(snapshot, this.rotationPressure);
+    const rotation = snapshot.state === "conversation_limit" || pressureReason !== undefined;
+    const rotationReason = snapshot.state === "conversation_limit"
+      ? "conversation_limit"
+      : "context_pressure" as const;
     const prompt = rotation
       ? goalResumePrompt(decision)
       : goalContinuePrompt(decision);
@@ -208,9 +236,18 @@ export class GoalContinuationWatchdog {
           now: this.now(),
         });
       }
+      if (rotation) {
+        return {
+          goalId: goal.id,
+          kind: "sent_resume",
+          roundNumber: decision.roundNumber,
+          resumeNonce: decision.nonce,
+          reason: rotationReason,
+        };
+      }
       return {
         goalId: goal.id,
-        kind: rotation ? "sent_resume" : "sent_continue",
+        kind: "sent_continue",
         roundNumber: decision.roundNumber,
         resumeNonce: decision.nonce,
       };
@@ -222,6 +259,60 @@ export class GoalContinuationWatchdog {
       };
     }
   }
+}
+
+export function contextPressureReason(
+  snapshot: GoalBrowserSnapshot,
+  limits: GoalRotationPressureLimits = DEFAULT_GOAL_ROTATION_PRESSURE,
+): string | undefined {
+  if (snapshot.state !== "idle") return undefined;
+  const assistantTurns = finiteNonNegative(snapshot.assistantTurns);
+  const userTurns = finiteNonNegative(snapshot.userTurns);
+  const visibleChars = finiteNonNegative(snapshot.visibleConversationChars);
+  const totalTurns = assistantTurns !== undefined && userTurns !== undefined
+    ? assistantTurns + userTurns
+    : undefined;
+
+  if (assistantTurns !== undefined && assistantTurns >= limits.maxAssistantTurns) {
+    return `assistant_turns:${assistantTurns}/${limits.maxAssistantTurns}`;
+  }
+  if (totalTurns !== undefined && totalTurns >= limits.maxTotalTurns) {
+    return `total_turns:${totalTurns}/${limits.maxTotalTurns}`;
+  }
+  if (visibleChars !== undefined && visibleChars >= limits.maxVisibleConversationChars) {
+    return `visible_chars:${visibleChars}/${limits.maxVisibleConversationChars}`;
+  }
+  return undefined;
+}
+
+function normalizeRotationPressure(
+  input: Partial<GoalRotationPressureLimits> | undefined,
+): GoalRotationPressureLimits {
+  return {
+    maxAssistantTurns: boundedPositiveInteger(
+      input?.maxAssistantTurns,
+      DEFAULT_GOAL_ROTATION_PRESSURE.maxAssistantTurns,
+    ),
+    maxTotalTurns: boundedPositiveInteger(
+      input?.maxTotalTurns,
+      DEFAULT_GOAL_ROTATION_PRESSURE.maxTotalTurns,
+    ),
+    maxVisibleConversationChars: boundedPositiveInteger(
+      input?.maxVisibleConversationChars,
+      DEFAULT_GOAL_ROTATION_PRESSURE.maxVisibleConversationChars,
+    ),
+  };
+}
+
+function boundedPositiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value < 1) throw new Error("Goal rotation pressure limits must be positive numbers.");
+  return Math.floor(value);
+}
+
+function finiteNonNegative(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
 }
 
 function createResumeNonce(): string {
@@ -238,6 +329,7 @@ function goalContinuePrompt(decision: Extract<GoalContinuationDecision, { kind: 
     "First acknowledge this continuation by calling goal action=status with goal_id and resume_nonce.",
     "Recover the persisted current step and workspace state through MCP, then continue the work.",
     "Do not restart from scratch and do not use a local model as the Goal reasoning agent.",
+    "If this turn ends before the Goal reaches a terminal/approval/blocked state, checkpoint the durable Goal with the current state, next concrete step, and any important decisions, failures, or evidence before ending the turn.",
     "Continue until the Goal succeeds, becomes blocked, waits for approval, is cancelled, or this ChatGPT turn ends.",
   ].join("\n");
 }
@@ -252,6 +344,7 @@ function goalResumePrompt(decision: Extract<GoalContinuationDecision, { kind: "c
     "Call goal action=attach with goal_id and resume_nonce before taking other action.",
     "Load the Resume Capsule and current workspace delta through DevPilot MCP.",
     "Do not reconstruct the task from old chat history and do not restart from scratch.",
+    "If this turn ends before the Goal reaches a terminal/approval/blocked state, checkpoint the durable Goal with the current state, next concrete step, and any important decisions, failures, or evidence before ending the turn.",
     "Continue from the persisted next step until the Goal succeeds, becomes blocked, waits for approval, is cancelled, or this turn ends.",
   ].join("\n");
 }

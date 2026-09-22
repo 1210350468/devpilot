@@ -90,7 +90,7 @@ The persistent Goal now has a real ChatGPT Web continuation path in the experime
 5. cross-chat conversation rotation followed by `goal attach` recovery;
 6. a Supervisor-managed watchdog service that sleeps completely when no Goal is continuable.
 
-Remaining work after this slice is primarily product hardening rather than proving the continuation architecture: no-progress/same-failure policy, Control Center Goal controls, broader crash injection, proactive rotation heuristics, and the previously planned PWC latency/cold-start work.
+Remaining work after this slice is primarily product hardening rather than proving the continuation architecture: no-progress/same-failure policy, Control Center Goal controls, broader crash injection, and additional long-session benchmarks. The experimental branch now includes the planned PWC latency/cold-start work plus a first proactive rotation heuristic.
 
 The browser layer should reuse AsterBridge's verified RoxyBrowser endpoint discovery, CDP connection, target ownership, ChatGPT composer/turn binding, terminal-error detection, and bounded page-rebind logic. DevPilot should depend on a narrow browser-adapter contract rather than copy AsterBridge's complete agent/runtime stack.
 
@@ -110,7 +110,7 @@ Only `running` and `verifying` Goals are continuable. A watchdog first acquires 
 
 Claims are idempotent by nonce. If the watcher crashes after sending but before acknowledgement, an expired lease can be reclaimed by another watcher with the same nonce without incrementing the round. A different nonce cannot take an unexpired lease. This bounds crash recovery to at most a retry of the same idempotent continuation prompt rather than silently creating a second logical round.
 
-The continuation claim also enforces `max_rounds` and `max_wall_time_minutes`. Exhaustion transitions the Goal to `blocked`, clears continuation ownership, and prevents automatic browser sends.
+The continuation claim enforces four independent stopping budgets: `max_rounds`, `max_wall_time_minutes`, `max_no_progress_rounds`, and `max_same_failure`. The latter two are persistent guards rather than prompt conventions. Before a new logical round is claimed, DevPilot hashes the meaningful durable Goal snapshot (summary/current step/next step/Resume Capsule/criterion verification state) and compares it with the previous round boundary. Repeated unchanged snapshots increment the no-progress counter; a meaningful checkpoint or verification change resets it. The latest recorded failure is hashed separately, so repeatedly hitting the same failed strategy can stop the Goal even when incidental summary text changes. Idempotent crash recovery with the same resume nonce does not count as a new round and therefore cannot falsely increment either guard. Exhaustion transitions the Goal to `blocked`, clears continuation ownership, appends a reasoned `budget_exhausted` event, and prevents automatic browser sends.
 
 ## Browser adapter and Watchdog core
 
@@ -129,6 +129,8 @@ error
 and provides only three operations: inspect, send a continuation in the current conversation, or rotate to a new conversation and send a resume prompt. The Watchdog contains Goal/lease policy; the adapter contains browser mechanics.
 
 When a page is `idle`, the Watchdog sends a compact `GOAL_CONTINUE` prompt. When it reports `conversation_limit`, it sends `GOAL_RESUME` in a newly rotated conversation and persists the new browser binding. It never claims a round while ChatGPT is generating or unavailable. `waiting_approval`, `blocked`, paused, terminal, and cancelled Goals are excluded before browser inspection.
+
+The Watchdog can also rotate proactively before a hard conversation-limit banner appears. This is deliberately not a token estimator. RoxyBrowser reports only observable DOM pressure: assistant-turn count, total visible user/assistant turns, and visible conversation text characters. The default safety thresholds are 72 assistant turns, 140 total turns, or 600,000 visible characters. Reaching any threshold while the page is idle uses the same `GOAL_RESUME → goal.attach → hydrate.md` recovery path as a hard conversation-limit rotation. These numbers are operational guardrails for replaceable Goal conversations, not claims about ChatGPT's private prompt size or context-window limit.
 
 Migration 11 adds `goal_browser_bindings`, which stores only transport metadata (adapter id, conversation URL/key, rotation count). It is not task truth and it contains no transcript.
 

@@ -193,9 +193,12 @@ export function registerGoalTool(input: {
           const responseGoalId = goalIdFromResponse(response);
           if (responseGoalId) {
             try {
+              const goal = goalStore.requireGoal(responseGoalId);
+              const workspace = await workspaces.getWorkspace(goal.workspaceSessionId);
               const context = await contextStore.refresh(
-                goalStore.requireGoal(responseGoalId),
+                goal,
                 goalStore.listEvents(responseGoalId, 30),
+                { workspaceRoot: workspace.root },
               );
               const structuredContent = response.structuredContent as Record<string, unknown>;
               structuredContent.recovery_context = {

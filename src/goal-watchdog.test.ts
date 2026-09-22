@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { GoalStore, type GoalBrowserBinding, type PersistentGoal } from "./goal-store.js";
 import {
+  contextPressureReason,
   GoalContinuationWatchdog,
   type GoalBrowserAdapter,
   type GoalBrowserSendResult,
@@ -76,6 +77,7 @@ test("watchdog sends one continuation, waits for acknowledgement, then advances 
   assert.equal(browser.continues.length, 1);
   assert.match(browser.continues[0]?.prompt ?? "", /GOAL_CONTINUE/);
   assert.match(browser.continues[0]?.prompt ?? "", /resume_nonce=/);
+  assert.match(browser.continues[0]?.prompt ?? "", /checkpoint the durable Goal/);
 
   const pending = await watchdog.tickGoal(context.goalStore.requireGoal(goal.id));
   assert.equal(pending.kind, "pending_ack");
@@ -117,12 +119,84 @@ test("watchdog rotates conversation when the current Chat reaches its limit", as
 
   const outcome = await watchdog.tickGoal(goal);
   assert.equal(outcome.kind, "sent_resume");
+  if (outcome.kind !== "sent_resume") throw new Error("Expected rotated continuation.");
+  assert.equal(outcome.reason, "conversation_limit");
   assert.equal(browser.rotations.length, 1);
   assert.match(browser.rotations[0]?.prompt ?? "", /GOAL_RESUME/);
   assert.match(browser.rotations[0]?.prompt ?? "", /action=attach/);
+  assert.match(browser.rotations[0]?.prompt ?? "", /checkpoint the durable Goal/);
   const binding = context.goalStore.getBrowserBinding(goal.id);
   assert.equal(binding?.conversationUrl, "https://chatgpt.com/c/chat-b");
   assert.equal(binding?.rotationCount, 1);
+});
+
+test("watchdog proactively rotates before the Chat reaches its hard limit", async (t) => {
+  const context = await fixture(t, "ws_pressure_rotation");
+  const goal = context.goalStore.createGoal({
+    workspaceSessionId: context.workspaceId,
+    objective: "Rotate before context pressure becomes a hard host limit.",
+    criteria: [{ id: "done", description: "Finish the task." }],
+  });
+  const browser = new FakeBrowser();
+  browser.snapshot = {
+    state: "idle",
+    conversationUrl: "https://chatgpt.com/c/chat-pressure",
+    conversationKey: "chat-pressure",
+    userTurns: 6,
+    assistantTurns: 5,
+    visibleConversationChars: 12_000,
+  };
+  const watchdog = new GoalContinuationWatchdog(context.goalStore, browser, {
+    ownerId: "watchdog-pressure",
+    rotationPressure: {
+      maxAssistantTurns: 5,
+      maxTotalTurns: 100,
+      maxVisibleConversationChars: 1_000_000,
+    },
+  });
+
+  const outcome = await watchdog.tickGoal(goal);
+  assert.equal(outcome.kind, "sent_resume");
+  if (outcome.kind !== "sent_resume") throw new Error("Expected proactive rotation.");
+  assert.equal(outcome.reason, "context_pressure");
+  assert.equal(browser.continues.length, 0);
+  assert.equal(browser.rotations.length, 1);
+  assert.equal(context.goalStore.getBrowserBinding(goal.id)?.rotationCount, 1);
+});
+
+test("context pressure uses observable counts and characters without pretending to know tokens", () => {
+  assert.equal(contextPressureReason({
+    state: "idle",
+    userTurns: 8,
+    assistantTurns: 8,
+    visibleConversationChars: 999,
+  }, {
+    maxAssistantTurns: 50,
+    maxTotalTurns: 16,
+    maxVisibleConversationChars: 10_000,
+  }), "total_turns:16/16");
+
+  assert.equal(contextPressureReason({
+    state: "idle",
+    userTurns: 1,
+    assistantTurns: 1,
+    visibleConversationChars: 50_000,
+  }, {
+    maxAssistantTurns: 50,
+    maxTotalTurns: 100,
+    maxVisibleConversationChars: 50_000,
+  }), "visible_chars:50000/50000");
+
+  assert.equal(contextPressureReason({
+    state: "generating",
+    userTurns: 100,
+    assistantTurns: 100,
+    visibleConversationChars: 1_000_000,
+  }, {
+    maxAssistantTurns: 1,
+    maxTotalTurns: 1,
+    maxVisibleConversationChars: 1,
+  }), undefined);
 });
 
 test("two watchdog owners cannot send the same Goal round concurrently", async (t) => {

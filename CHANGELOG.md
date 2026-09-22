@@ -4,6 +4,9 @@
 
 ## Unreleased — Persistent Workspace Channel v2
 
+- Add proactive Goal conversation rotation based on observable ChatGPT DOM pressure (assistant turns, total visible turns, and visible conversation characters), reusing the existing `GOAL_RESUME` recovery path without pretending to know private model token usage.
+- Add a bounded project Markdown heading index to Persistent Context. It ranks source Markdown against the current Goal and exposes paths/headings/line numbers without copying source bodies; a multi-megabyte regression verifies that large handoff corpora stay external while hydration remains bounded.
+- Enforce `max_no_progress_rounds` and `max_same_failure` as persistent continuation guards. Migration 12 stores only compact progress/failure fingerprints and counters; unchanged durable Goal state or a repeatedly recorded failure blocks automatic continuation, while idempotent same-nonce crash retries do not consume the guard budget.
 - Start the GPT-native Persistent Goal runtime as the next PWC slice. A new top-level `goal` MCP tool persists objective, acceptance criteria, evidence, compact resume state, cross-conversation attachments, and an append-only event journal in the existing DevPilot SQLite database; the ChatGPT host remains the reasoning agent and no local model is required.
 - Add SQLite migration 10 (`persistent-goals`) with goal, criterion, conversation-binding, and event tables linked to the existing workspace-session lifecycle.
 - Make Goal completion fail closed: `goal finish` returns `GOAL_NOT_COMPLETE` while any required criterion is not verified as passed, so a browser continuation layer can rely on durable Goal state instead of assistant prose.
