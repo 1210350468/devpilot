@@ -154,6 +154,17 @@ test("request diagnostics ignore non-MCP traffic and old requests", () => {
     durationMs: 10,
   });
   observer.start({
+    id: "protocol-probe",
+    startedAt: "2026-10-05T01:09:58.000Z",
+    method: "POST",
+    path: "/mcp",
+  });
+  observer.finish("protocol-probe", {
+    completedAt: "2026-10-05T01:09:58.001Z",
+    status: 415,
+    durationMs: 1,
+  });
+  observer.start({
     id: "old",
     startedAt: "2026-10-05T01:00:00.000Z",
     method: "POST",

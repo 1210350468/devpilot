@@ -141,7 +141,7 @@ export class RequestObserver {
     const verySlowThresholdMs = options.verySlowThresholdMs ?? 15_000;
     const cutoffMs = nowMs - windowMs;
     const recent = this.entries.filter((entry) => {
-      if (entry.path !== "/mcp") return false;
+      if (entry.path !== "/mcp" || !entry.mcpMethod) return false;
       const startedMs = Date.parse(entry.startedAt);
       return Number.isFinite(startedMs) && startedMs >= cutoffMs;
     });

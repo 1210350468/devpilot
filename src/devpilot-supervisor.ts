@@ -347,7 +347,7 @@ export class DevPilotSupervisor {
       : this.config.tunnelProvider === "cloudflare-quick"
         ? this.tunnelStatus.state === "running" && this.cloudflarePublicReady
         : undefined;
-    if (typeof tunnelReady === "boolean" && ["running", "starting"].includes(this.tunnelStatus.state)) {
+    if (typeof tunnelReady === "boolean" && this.tunnelStatus.state === "running") {
       this.recordTunnelHealth(tunnelReady);
     }
     const publicMcpUrl = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
@@ -529,7 +529,7 @@ export class DevPilotSupervisor {
   }
 
   private async sampleTunnelHealth(): Promise<void> {
-    if (!["running", "starting"].includes(this.tunnelStatus.state)) return;
+    if (this.tunnelStatus.state !== "running") return;
     this.recordTunnelHealth(await isReady(this.healthUrl()));
   }
 
