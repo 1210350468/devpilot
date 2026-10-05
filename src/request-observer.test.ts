@@ -182,3 +182,25 @@ test("request diagnostics ignore non-MCP traffic and old requests", () => {
   assert.equal(diagnostics.receivedCount, 0);
   assert.equal(diagnostics.latestRequestAt, undefined);
 });
+
+test("request diagnostics mark a completed five-second call as slow", () => {
+  const observer = new RequestObserver();
+  observer.start({
+    id: "slow-only",
+    startedAt: "2026-10-05T01:00:00.000Z",
+    method: "POST",
+    path: "/mcp",
+    mcpMethod: "tools/call",
+    toolName: "exec_command",
+  });
+  observer.finish("slow-only", {
+    completedAt: "2026-10-05T01:00:06.000Z",
+    status: 200,
+    durationMs: 6_000,
+  });
+
+  const diagnostics = observer.diagnostics({ nowMs: Date.parse("2026-10-05T01:00:07.000Z") });
+  assert.equal(diagnostics.state, "slow");
+  assert.equal(diagnostics.slowCount, 1);
+  assert.equal(diagnostics.verySlowCount, 0);
+});

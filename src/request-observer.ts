@@ -162,7 +162,7 @@ export class RequestObserver {
       .slice(0, 8);
     const state: RequestDiagnosticState = failed.length > 0
       ? "error"
-      : verySlow.length > 0
+      : slow.length > 0
         ? "slow"
         : running.length > 0
           ? "busy"
