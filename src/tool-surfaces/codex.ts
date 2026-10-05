@@ -45,6 +45,8 @@ const CODEX_REGISTRATIONS: readonly CodexRegistration[] = [
   registerWorkspaceTurnTool,
 ];
 
+const MAX_HOST_PROCESS_YIELD_MS = 4_000;
+
 const workspaceTurnReadSchema = z.object({
   kind: z.literal("read"),
   path: z.string().describe("File path relative to the workspace, an advertised skill path, or a Goal recovery path returned by goal."),
@@ -281,10 +283,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .number()
           .int()
           .min(0)
-          .max(MAX_PROCESS_YIELD_MS)
+          .max(MAX_HOST_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait before returning a running session. Defaults to 2000 for faster feedback on long commands, maximum 12000. Use write_stdin for work that runs longer.",
+            "Milliseconds to wait before returning a running session. Defaults to 2000 for faster feedback on long commands, maximum 4000. Use write_stdin for work that runs longer.",
           ),
         max_output_tokens: z
           .number()
@@ -383,10 +385,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .number()
           .int()
           .min(0)
-          .max(MAX_PROCESS_YIELD_MS)
+          .max(MAX_HOST_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait for process output or completion. Maximum 12000; polling defaults to 5000 and interactive writes to 250.",
+            "Milliseconds to wait for process output or completion. Maximum 4000; polling defaults to 2000 and interactive writes remain short. Poll again for longer work instead of holding one MCP request open.",
           ),
         max_output_tokens: z
           .number()

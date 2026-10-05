@@ -186,7 +186,7 @@ test("model-facing tool schemas use snake_case recursively", async (t) => {
   }
 });
 
-test("Codex process tools bound model-facing yield windows to 12 seconds", async (t) => {
+test("Codex process tools bound model-facing yield windows to four seconds", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const tools = await context.client.listTools();
 
@@ -197,10 +197,12 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
       description?: string;
     } | undefined;
 
-    assert.equal(yieldSchema?.maximum, 12_000);
-    assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
+    assert.equal(yieldSchema?.maximum, 4_000);
+    assert.match(yieldSchema?.description ?? "", /maximum 4000/i);
     if (toolName === "exec_command") {
       assert.match(yieldSchema?.description ?? "", /defaults to 2000/i);
+    } else {
+      assert.match(yieldSchema?.description ?? "", /polling defaults to 2000/i);
     }
   }
 });
@@ -889,7 +891,7 @@ test("server shutdown waits for an active MCP tool call", async (t) => {
       arguments: {
         workspace_id: workspaceId,
         cmd: `node -e \"${command}\"`,
-        yield_time_ms: 12_000,
+        yield_time_ms: 4_000,
       },
     },
   );
