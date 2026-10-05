@@ -186,7 +186,7 @@ test("model-facing tool schemas use snake_case recursively", async (t) => {
   }
 });
 
-test("Codex process tools bound model-facing yield windows to four seconds", async (t) => {
+test("Codex process tools accept cached 12-second requests but advertise a four-second effective cap", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const tools = await context.client.listTools();
 
@@ -197,13 +197,51 @@ test("Codex process tools bound model-facing yield windows to four seconds", asy
       description?: string;
     } | undefined;
 
-    assert.equal(yieldSchema?.maximum, 4_000);
-    assert.match(yieldSchema?.description ?? "", /maximum 4000/i);
+    assert.equal(yieldSchema?.maximum, 12_000);
+    assert.match(yieldSchema?.description ?? "", /effective synchronous wait is capped at 4000/i);
     if (toolName === "exec_command") {
       assert.match(yieldSchema?.description ?? "", /defaults to 2000/i);
     } else {
       assert.match(yieldSchema?.description ?? "", /polling defaults to 2000/i);
     }
+  }
+});
+
+test("standalone Codex process tools clamp cached 12-second waits to four seconds", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "standalone-yield-cap"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedAt = performance.now();
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: "node -e \"setTimeout(() => {}, 8000)\"",
+      yield_time_ms: 12_000,
+    },
+  });
+  const elapsedMs = performance.now() - startedAt;
+  const structured = structuredContent(response);
+  const sessionId = structured.session_id;
+
+  assert.equal(response.isError, undefined);
+  assert.equal(structured.running, true);
+  assert.equal(typeof sessionId, "number");
+  assert.ok(elapsedMs < 5_000, `exec_command held the MCP call for ${Math.round(elapsedMs)}ms`);
+
+  if (typeof sessionId === "number") {
+    await context.client.callTool({
+      name: "write_stdin",
+      arguments: {
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        chars: "\u0003",
+        yield_time_ms: 12_000,
+      },
+    });
   }
 });
 

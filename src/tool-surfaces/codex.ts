@@ -283,10 +283,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .number()
           .int()
           .min(0)
-          .max(MAX_HOST_PROCESS_YIELD_MS)
+          .max(MAX_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait before returning a running session. Defaults to 2000 for faster feedback on long commands, maximum 4000. Use write_stdin for work that runs longer.",
+            "Milliseconds to wait before returning a running session. Defaults to 2000. Values up to 12000 are accepted for cached-schema compatibility, but the effective synchronous wait is capped at 4000. Use write_stdin for work that runs longer.",
           ),
         max_output_tokens: z
           .number()
@@ -312,7 +312,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const workingDirectory = working_directory;
-      const yieldTimeMs = yield_time_ms;
+      const yieldTimeMs = capHostProcessYieldTime(yield_time_ms);
       const maxOutputTokens = max_output_tokens;
       const snapshot = await runLoggedToolOperation(
         config,
@@ -385,10 +385,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .number()
           .int()
           .min(0)
-          .max(MAX_HOST_PROCESS_YIELD_MS)
+          .max(MAX_PROCESS_YIELD_MS)
           .optional()
           .describe(
-            "Milliseconds to wait for process output or completion. Maximum 4000; polling defaults to 2000 and interactive writes remain short. Poll again for longer work instead of holding one MCP request open.",
+            "Milliseconds to wait for process output or completion. Values up to 12000 are accepted for cached-schema compatibility, but the effective synchronous wait is capped at 4000; polling defaults to 2000 and interactive writes remain short. Poll again for longer work instead of holding one MCP request open.",
           ),
         max_output_tokens: z
           .number()
@@ -413,7 +413,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const sessionId = session_id;
-      const yieldTimeMs = yield_time_ms;
+      const yieldTimeMs = capHostProcessYieldTime(yield_time_ms);
       const maxOutputTokens = max_output_tokens;
       const snapshot = await runLoggedToolOperation(
         config,
@@ -436,6 +436,11 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       return processToolResponse(snapshot);
     },
   );
+}
+
+function capHostProcessYieldTime(requested: number | undefined): number | undefined {
+  if (requested === undefined) return undefined;
+  return Math.min(requested, MAX_HOST_PROCESS_YIELD_MS);
 }
 
 function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
