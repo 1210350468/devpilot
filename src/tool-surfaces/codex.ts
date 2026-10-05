@@ -56,7 +56,9 @@ const workspaceTurnExecSchema = z.object({
   kind: z.literal("exec"),
   cmd: z.string().min(1).describe("Shell command to execute."),
   working_directory: z.string().optional(),
-  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional(),
+  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional().describe(
+    "Requested synchronous wait for this command. workspace_turn defaults to 750ms and shares a 6000ms aggregate process-wait budget across the whole batch; longer work returns a session_id for later polling.",
+  ),
   max_output_tokens: z.number().int().positive().max(100_000).optional(),
 });
 
@@ -64,7 +66,9 @@ const workspaceTurnPollSchema = z.object({
   kind: z.literal("poll"),
   session_id: z.number().int().positive(),
   chars: z.string().optional(),
-  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional(),
+  yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional().describe(
+    "Requested synchronous wait for this poll. workspace_turn defaults to 1000ms and shares a 6000ms aggregate process-wait budget across the whole batch.",
+  ),
   max_output_tokens: z.number().int().positive().max(100_000).optional(),
 });
 
@@ -128,6 +132,9 @@ type WorkspaceTurnStep = {
 const DEFAULT_WORKSPACE_TURN_RESULT_CHARS = 32_000;
 const MIN_WORKSPACE_TURN_RESULT_CHARS = 4_000;
 const MAX_WORKSPACE_TURN_RESULT_CHARS = 96_000;
+const DEFAULT_WORKSPACE_TURN_EXEC_YIELD_MS = 750;
+const DEFAULT_WORKSPACE_TURN_POLL_YIELD_MS = 1_000;
+const WORKSPACE_TURN_PROCESS_WAIT_BUDGET_MS = 6_000;
 const WORKSPACE_TURN_TRUNCATION_NOTICE =
   "\n[workspace_turn result truncated to the turn context budget; use a focused read/exec if more detail is needed.]";
 
@@ -514,6 +521,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       const stopOnError = stop_on_error ?? true;
       const workspace = await workspaces.getWorkspace(workspaceId);
       const steps: WorkspaceTurnStep[] = [];
+      const processWaitDeadline = performance.now() + WORKSPACE_TURN_PROCESS_WAIT_BUDGET_MS;
 
       for (const [index, operation] of operations.entries()) {
         if (operation.kind === "read") {
@@ -544,12 +552,17 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
 
         if (operation.kind === "exec") {
           const cwd = workspaces.resolveWorkingDirectory(workspace, operation.working_directory);
+          const yieldTimeMs = workspaceTurnYieldTime(
+            operation.yield_time_ms,
+            DEFAULT_WORKSPACE_TURN_EXEC_YIELD_MS,
+            processWaitDeadline,
+          );
           const snapshot = await processSessions.start({
             workspaceId,
             command: operation.cmd,
             cwd,
             workspaceRoot: workspace.root,
-            yieldTimeMs: operation.yield_time_ms,
+            yieldTimeMs,
             maxOutputTokens: operation.max_output_tokens,
           });
           const ok = snapshot.running || snapshot.exitCode === 0;
@@ -660,11 +673,16 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           continue;
         }
 
+        const yieldTimeMs = workspaceTurnYieldTime(
+          operation.yield_time_ms,
+          DEFAULT_WORKSPACE_TURN_POLL_YIELD_MS,
+          processWaitDeadline,
+        );
         const snapshot = await processSessions.write({
           workspaceId,
           sessionId: operation.session_id,
           chars: operation.chars,
-          yieldTimeMs: operation.yield_time_ms,
+          yieldTimeMs,
           maxOutputTokens: operation.max_output_tokens,
         });
         const ok = snapshot.running || snapshot.exitCode === 0;
@@ -705,6 +723,12 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
       };
     },
   );
+}
+
+function workspaceTurnYieldTime(requested: number | undefined, fallback: number, deadline: number): number {
+  const desired = requested ?? fallback;
+  const remaining = Math.max(0, Math.floor(deadline - performance.now()));
+  return Math.min(desired, remaining);
 }
 
 function applyWorkspaceTurnResultBudget(

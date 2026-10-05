@@ -241,6 +241,50 @@ test("workspace_turn batches reads and commands in one Codex tool call", async (
   assert.doesNotMatch(rendered, /batch-command/);
 });
 
+test("workspace_turn keeps long batched commands within a short synchronous wait budget", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-wait-budget"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedAt = performance.now();
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+      ],
+    },
+  });
+  const elapsedMs = performance.now() - startedAt;
+  const structured = structuredContent(response);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  const sessionIds = steps
+    .map((step) => step.session_id)
+    .filter((value): value is number => typeof value === "number");
+  for (const sessionId of sessionIds) {
+    await context.client.callTool({
+      name: "write_stdin",
+      arguments: {
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        chars: "\u0003",
+        yield_time_ms: 1_000,
+      },
+    });
+  }
+
+  assert.equal(response.isError, undefined);
+  assert.equal(steps.length, 3);
+  assert.equal(steps.every((step) => step.running === true), true);
+  assert.equal(steps.every((step) => typeof step.session_id === "number"), true);
+  assert.ok(elapsedMs < 4_000, `workspace_turn held the MCP call for ${Math.round(elapsedMs)}ms`);
+});
+
 test("workspace_turn resolves the only workspace bound to the current Chat", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const opened = structuredContent(
