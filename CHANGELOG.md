@@ -4,6 +4,7 @@
 
 ## Unreleased — Persistent Workspace Channel v2
 
+- Add end-to-end connection diagnostics for intermittent ChatGPT hangs: the Request Observer now summarizes a five-minute local MCP window with running/failed/slow/very-slow counts, P95/max duration, latest arrival time, and the oldest running call; the Supervisor records OpenAI Secure Tunnel `/readyz` transitions and surfaces both in the Control Center so upstream delivery delays can be separated from local tool execution time.
 - Add proactive Goal conversation rotation based on observable ChatGPT DOM pressure (assistant turns, total visible turns, and visible conversation characters), reusing the existing `GOAL_RESUME` recovery path without pretending to know private model token usage.
 - Add a bounded project Markdown heading index to Persistent Context. It ranks source Markdown against the current Goal and exposes paths/headings/line numbers without copying source bodies; a multi-megabyte regression verifies that large handoff corpora stay external while hydration remains bounded.
 - Cache project Markdown discovery briefly and reuse heading parses while source size/mtime is unchanged, avoiding repeated large-tree walks during several Goal calls in one ChatGPT turn without making the cache authoritative.

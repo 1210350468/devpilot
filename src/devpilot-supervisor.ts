@@ -18,6 +18,7 @@ import { createServer } from "./server.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { RequestObserver } from "./request-observer.js";
 import { acquireTunnelLease, type TunnelLease } from "./tunnel-lease.js";
+import { TunnelHealthHistory, type TunnelHealthSnapshot } from "./connection-diagnostics.js";
 import { loadDevspaceFiles, setDevspaceConfigValues } from "./user-config.js";
 
 const OPENAI_TUNNEL_ID = /^tunnel_[0-9a-f]{32}$/;
@@ -90,6 +91,10 @@ export interface DevPilotStatus {
   providers: ReturnType<typeof getLocalAgentProviderAvailabilitySnapshot>;
   goalAutomation: GoalWatchdogServiceSnapshot;
   requestObserver: { enabled: true; retained: number };
+  diagnostics: {
+    requests: ReturnType<RequestObserver["diagnostics"]>;
+    tunnel: TunnelHealthSnapshot;
+  };
   events: EventEntry[];
 }
 
@@ -98,6 +103,8 @@ export class DevPilotSupervisor {
   readonly config: DevPilotSupervisorConfig;
   private serverConfig: ServerConfig;
   private readonly requestObserver = new RequestObserver();
+  private readonly tunnelHealth = new TunnelHealthHistory();
+  private tunnelHealthTimer?: ReturnType<typeof setInterval>;
   private running?: ReturnType<typeof createServer>;
   private serverHttp?: Server;
   private serverStatus: ServiceStatus = { state: "stopped" };
@@ -128,6 +135,7 @@ export class DevPilotSupervisor {
       http.once("error", reject);
     });
     this.pushEvent("info", `Control Center listening on ${this.controlUrl()}`);
+    this.startTunnelHealthMonitor();
     if (this.config.autoStart) {
       void this.startServices().catch((error) => this.pushEvent("error", `Auto-start failed: ${errorMessage(error)}`));
     }
@@ -135,6 +143,10 @@ export class DevPilotSupervisor {
   }
 
   async close(): Promise<void> {
+    if (this.tunnelHealthTimer) {
+      clearInterval(this.tunnelHealthTimer);
+      this.tunnelHealthTimer = undefined;
+    }
     await this.stopServices();
     if (!this.controlHttp) return;
     const http = this.controlHttp;
@@ -286,6 +298,7 @@ export class DevPilotSupervisor {
       });
       this.tunnelProcess = child;
       this.tunnelStatus = { state: "running", pid: child.pid, startedAt: new Date().toISOString() };
+      this.recordTunnelHealth(true);
       child.once("exit", (code, signal) => {
         if (this.tunnelProcess !== child) return;
         this.tunnelProcess = undefined;
@@ -293,6 +306,7 @@ export class DevPilotSupervisor {
         this.tunnelLease = undefined;
         if (lease && lease === acquiredLease) void lease.release().catch(() => undefined);
         this.tunnelStatus = { state: "error", error: `tunnel-client exited (${signal ?? code ?? "unknown"}).` };
+        this.recordTunnelHealth(false);
         this.pushEvent("error", this.tunnelStatus.error!);
       });
       this.pushEvent("info", "OpenAI Secure MCP Tunnel is READY.");
@@ -333,6 +347,9 @@ export class DevPilotSupervisor {
       : this.config.tunnelProvider === "cloudflare-quick"
         ? this.tunnelStatus.state === "running" && this.cloudflarePublicReady
         : undefined;
+    if (typeof tunnelReady === "boolean" && ["running", "starting"].includes(this.tunnelStatus.state)) {
+      this.recordTunnelHealth(tunnelReady);
+    }
     const publicMcpUrl = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
       ? new URL("/mcp", this.tunnelPublicBaseUrl).toString()
       : this.config.tunnelProvider === "openai-secure" && this.config.tunnelId
@@ -375,6 +392,10 @@ export class DevPilotSupervisor {
       requestObserver: {
         enabled: true,
         retained: this.requestObserver.list(200).length,
+      },
+      diagnostics: {
+        requests: this.requestObserver.diagnostics(),
+        tunnel: this.tunnelHealth.snapshot(),
       },
       events: [...this.events].reverse(),
     };
@@ -496,6 +517,29 @@ export class DevPilotSupervisor {
   private pushEvent(level: EventEntry["level"], message: string): void {
     this.events.push({ at: new Date().toISOString(), level, message });
     if (this.events.length > 80) this.events.splice(0, this.events.length - 80);
+  }
+
+  private startTunnelHealthMonitor(): void {
+    if (this.config.tunnelProvider !== "openai-secure" || this.tunnelHealthTimer) return;
+    this.tunnelHealthTimer = setInterval(() => {
+      void this.sampleTunnelHealth();
+    }, 5_000);
+    this.tunnelHealthTimer.unref();
+    void this.sampleTunnelHealth();
+  }
+
+  private async sampleTunnelHealth(): Promise<void> {
+    if (!["running", "starting"].includes(this.tunnelStatus.state)) return;
+    this.recordTunnelHealth(await isReady(this.healthUrl()));
+  }
+
+  private recordTunnelHealth(ready: boolean): void {
+    const transition = this.tunnelHealth.sample(ready);
+    if (!transition) return;
+    this.pushEvent(
+      ready ? "info" : "warn",
+      ready ? "OpenAI Secure MCP Tunnel readiness recovered." : "OpenAI Secure MCP Tunnel readiness lost.",
+    );
   }
 
   private async stopGoalWatchdog(): Promise<void> {
