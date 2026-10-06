@@ -197,6 +197,116 @@ if (!buffered.outputTruncated && buffered.sessionId) {
 assert.equal(buffered.outputTruncated, true);
 if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
 
+const lifecycleManager = new ProcessSessionManager({
+  maxBufferCharacters: 1_024,
+  completedSessionTtlMs: 2_000,
+  idleSessionTimeoutMs: 80,
+  terminationGraceMs: 50,
+});
+
+const abandoned = await lifecycleManager.start({
+  workspaceId: "workspace-lifecycle",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => {}, 5000)"`,
+  yieldTimeMs: 5,
+});
+assert.equal(abandoned.running, true);
+assert.ok(abandoned.sessionId);
+await new Promise((resolve) => setTimeout(resolve, 250));
+const autoClosed = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: abandoned.sessionId,
+  yieldTimeMs: 20,
+});
+assert.equal(autoClosed.running, false);
+
+const renewed = await lifecycleManager.start({
+  workspaceId: "workspace-lifecycle",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => process.exit(0), 260)"`,
+  yieldTimeMs: 5,
+});
+assert.ok(renewed.sessionId);
+await new Promise((resolve) => setTimeout(resolve, 55));
+const renewedOnce = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: renewed.sessionId,
+  yieldTimeMs: 0,
+});
+assert.equal(renewedOnce.running, true);
+await new Promise((resolve) => setTimeout(resolve, 55));
+const renewedTwice = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: renewed.sessionId,
+  yieldTimeMs: 0,
+});
+assert.equal(renewedTwice.running, true);
+const renewedCompleted = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: renewed.sessionId,
+  yieldTimeMs: 500,
+});
+assert.equal(renewedCompleted.running, false);
+assert.equal(renewedCompleted.exitCode, 0);
+
+const persistent = await lifecycleManager.start({
+  workspaceId: "workspace-lifecycle",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => {}, 5000)"`,
+  yieldTimeMs: 5,
+  autoClose: false,
+});
+assert.ok(persistent.sessionId);
+await new Promise((resolve) => setTimeout(resolve, 180));
+const stillPersistent = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: persistent.sessionId,
+  yieldTimeMs: 0,
+});
+assert.equal(stillPersistent.running, true);
+lifecycleManager.terminate("workspace-lifecycle", persistent.sessionId);
+
+const hardLimited = await lifecycleManager.start({
+  workspaceId: "workspace-lifecycle",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => {}, 5000)"`,
+  yieldTimeMs: 5,
+  autoClose: false,
+  maxRuntimeMs: 80,
+});
+assert.ok(hardLimited.sessionId);
+await new Promise((resolve) => setTimeout(resolve, 250));
+const hardStopped = await lifecycleManager.write({
+  workspaceId: "workspace-lifecycle",
+  sessionId: hardLimited.sessionId,
+  yieldTimeMs: 20,
+});
+assert.equal(hardStopped.running, false);
+
+const detached = await lifecycleManager.start({
+  workspaceId: "workspace-lifecycle",
+  cwd: process.cwd(),
+  command: `${node} -e "console.log('detached-started'); setTimeout(() => {}, 800)"`,
+  yieldTimeMs: 200,
+  detach: true,
+});
+assert.equal(detached.running, false);
+assert.equal(detached.detached, true);
+assert.equal(detached.sessionId, undefined);
+assert.match(detached.output, /detached-started/);
+
+await assert.rejects(
+  lifecycleManager.start({
+    workspaceId: "workspace-lifecycle",
+    cwd: process.cwd(),
+    command: "echo invalid",
+    tty: true,
+    detach: true,
+  }),
+  /cannot allocate an interactive PTY/,
+);
+lifecycleManager.shutdown();
+
 try {
   if (process.platform === "win32") {
     const pty = await manager.start({

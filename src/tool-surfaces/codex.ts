@@ -27,7 +27,7 @@ import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. In a continued Chat or attached Goal, workspace_turn may omit workspace_id when the server can resolve exactly one current workspace; if resolution is ambiguous it fails closed and you must provide an explicit id. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. Ordinary non-interactive process sessions auto-close after an idle lease; poll them when their result is still needed. For commands that have safely launched durable background work (for example a remote nohup/setsid job), prefer detach=true so DevPilot does not retain a useless local process session. Use auto_close=false only for intentionally persistent/interactive process sessions. In a continued Chat or attached Goal, workspace_turn may omit workspace_id when the server can resolve exactly one current workspace; if resolution is ambiguous it fails closed and you must provide an explicit id. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -58,6 +58,18 @@ const workspaceTurnExecSchema = z.object({
   kind: z.literal("exec"),
   cmd: z.string().min(1).describe("Shell command to execute."),
   working_directory: z.string().optional(),
+  detach: z.boolean().optional().describe(
+    "Detach the local command after the initial yield if it is still running. No process session is retained. Use only when the command has safely backgrounded the work it needs to keep running.",
+  ),
+  auto_close: z.boolean().optional().describe(
+    "Automatically terminate an abandoned non-interactive process session after its idle lease expires. Defaults to true.",
+  ),
+  idle_timeout_ms: z.number().int().min(1_000).max(3_600_000).optional().describe(
+    "Idle lease for an auto-closing session. Polling or writing renews the lease. Defaults to 30000ms.",
+  ),
+  max_runtime_ms: z.number().int().min(1_000).max(86_400_000).optional().describe(
+    "Optional hard process runtime limit. When reached, DevPilot terminates the process tree even if it is still being polled.",
+  ),
   yield_time_ms: z.number().int().min(0).max(MAX_PROCESS_YIELD_MS).optional().describe(
     "Requested synchronous wait for this command. workspace_turn defaults to 750ms and shares a 6000ms aggregate process-wait budget across the whole batch; longer work returns a session_id for later polling.",
   ),
@@ -121,6 +133,7 @@ type WorkspaceTurnStep = {
   running?: boolean;
   exit_code?: number;
   output_truncated?: boolean;
+  detached?: boolean;
   checkpoint_status?: "active" | "blocked" | "done";
   checkpoint_updated_at?: string;
   changed_files?: string[];
@@ -141,7 +154,9 @@ const WORKSPACE_TURN_TRUNCATION_NOTICE =
   "\n[workspace_turn result truncated to the turn context budget; use a focused read/exec if more detail is needed.]";
 
 function processResult(snapshot: ProcessSnapshot): string {
-  const status = snapshot.running
+  const status = snapshot.detached
+    ? "Process detached; no DevPilot process session is retained."
+    : snapshot.running
     ? `Process running with session ID ${snapshot.sessionId}.`
     : snapshot.signal
       ? `Process exited after signal ${snapshot.signal}.`
@@ -159,6 +174,8 @@ function processOutputSchema(): z.ZodRawShape {
     signal: z.string().optional(),
     wall_time_ms: z.number().nonnegative(),
     output_truncated: z.boolean(),
+    detached: z.boolean().optional(),
+    auto_close: z.boolean().optional(),
   });
 }
 
@@ -175,6 +192,8 @@ function processToolResponse(snapshot: ProcessSnapshot) {
       signal: snapshot.signal,
       wall_time_ms: snapshot.wallTimeMs,
       output_truncated: snapshot.outputTruncated,
+      detached: snapshot.detached,
+      auto_close: snapshot.autoClose,
     },
   };
 }
@@ -273,6 +292,36 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .max(1_000)
           .optional()
           .describe("Initial PTY height. Defaults to 24."),
+        detach: z
+          .boolean()
+          .optional()
+          .describe(
+            "Detach the local command after the initial yield if it is still running. No session_id is retained. Use for commands that have already safely backgrounded their durable work, such as a remote nohup/setsid launcher.",
+          ),
+        auto_close: z
+          .boolean()
+          .optional()
+          .describe(
+            "Automatically terminate an abandoned non-interactive process session after its idle lease expires. Defaults to true; PTY commands default to false.",
+          ),
+        idle_timeout_ms: z
+          .number()
+          .int()
+          .min(1_000)
+          .max(3_600_000)
+          .optional()
+          .describe(
+            "Idle lease for an auto-closing session. Polling/writing renews it. Defaults to 30000ms.",
+          ),
+        max_runtime_ms: z
+          .number()
+          .int()
+          .min(1_000)
+          .max(86_400_000)
+          .optional()
+          .describe(
+            "Optional hard process runtime limit. At expiry DevPilot terminates the process tree even if it is still being polled.",
+          ),
         working_directory: z
           .string()
           .optional()
@@ -305,6 +354,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       tty,
       columns,
       rows,
+      detach,
+      auto_close,
+      idle_timeout_ms,
+      max_runtime_ms,
       working_directory,
       yield_time_ms,
       max_output_tokens,
@@ -338,6 +391,10 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             tty,
             columns,
             rows,
+            detach,
+            autoClose: auto_close,
+            idleTimeoutMs: idle_timeout_ms,
+            maxRuntimeMs: max_runtime_ms,
             yieldTimeMs,
             maxOutputTokens,
           });
@@ -496,6 +553,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
           running: z.boolean().optional(),
           exit_code: z.number().int().optional(),
           output_truncated: z.boolean().optional(),
+          detached: z.boolean().optional(),
           checkpoint_status: z.enum(["active", "blocked", "done"]).optional(),
           checkpoint_updated_at: z.string().optional(),
           changed_files: z.array(z.string()).optional(),
@@ -569,6 +627,10 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
             command: operation.cmd,
             cwd,
             workspaceRoot: workspace.root,
+            detach: operation.detach,
+            autoClose: operation.auto_close,
+            idleTimeoutMs: operation.idle_timeout_ms,
+            maxRuntimeMs: operation.max_runtime_ms,
             yieldTimeMs,
             maxOutputTokens: operation.max_output_tokens,
           });
@@ -797,5 +859,6 @@ function workspaceTurnProcessStep(
     running: snapshot.running,
     exit_code: snapshot.exitCode,
     output_truncated: snapshot.outputTruncated,
+    detached: snapshot.detached,
   };
 }

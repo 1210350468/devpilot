@@ -207,6 +207,33 @@ test("Codex process tools accept cached 12-second requests but advertise a four-
   }
 });
 
+test("exec_command detach returns without retaining a process session", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "detached-process"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const node = JSON.stringify(process.execPath);
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: `${node} -e "console.log('detached-ready'); setTimeout(() => {}, 800)"`,
+      yield_time_ms: 250,
+      detach: true,
+    },
+  });
+  const structured = structuredContent(response);
+
+  assert.equal(response.isError, undefined);
+  assert.equal(structured.detached, true);
+  assert.equal(structured.running, false);
+  assert.equal(structured.session_id, undefined);
+  assert.match(String(structured.result), /detached-ready/);
+  assert.match(String(structured.result), /no DevPilot process session is retained/i);
+});
+
 test("standalone Codex process tools clamp cached 12-second waits to four seconds", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const workspaceId = structuredContent(
