@@ -293,6 +293,7 @@ const detached = await lifecycleManager.start({
 assert.equal(detached.running, false);
 assert.equal(detached.detached, true);
 assert.equal(detached.sessionId, undefined);
+assert.equal(detached.exitCode, undefined);
 assert.match(detached.output, /detached-started/);
 
 await assert.rejects(

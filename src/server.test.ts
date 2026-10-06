@@ -230,6 +230,7 @@ test("exec_command detach returns without retaining a process session", async (t
   assert.equal(structured.detached, true);
   assert.equal(structured.running, false);
   assert.equal(structured.session_id, undefined);
+  assert.equal(structured.exit_code, undefined);
   assert.match(String(structured.result), /detached-ready/);
   assert.match(String(structured.result), /no DevPilot process session is retained/i);
 });

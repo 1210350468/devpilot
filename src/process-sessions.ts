@@ -63,6 +63,7 @@ interface ProcessSession {
   workspaceId: string;
   process?: ManagedProcess;
   startedAt: number;
+  finishedAt?: number;
   columns: number;
   rows: number;
   buffer: HeadTailBuffer;
@@ -278,6 +279,8 @@ export class ProcessSessionManager {
         sessionId: undefined,
         running: false,
         detached: true,
+        exitCode: undefined,
+        signal: undefined,
       };
       this.removeSession(session.id);
       return snapshot;
@@ -445,6 +448,7 @@ export class ProcessSessionManager {
     if (!session.running) return;
     this.clearLifecycleTimers(session);
     session.running = false;
+    session.finishedAt = Date.now();
     session.exitCode = exitCode;
     session.signal = signal;
     session.resolveExit();
@@ -471,7 +475,7 @@ export class ProcessSessionManager {
       running: session.running,
       exitCode: session.exitCode,
       signal: session.signal,
-      wallTimeMs: Date.now() - session.startedAt,
+      wallTimeMs: (session.finishedAt ?? Date.now()) - session.startedAt,
       detached: session.detached || undefined,
       autoClose: session.autoClose,
     };
@@ -541,6 +545,7 @@ export class ProcessSessionManager {
     }
     if (session.running) {
       session.running = false;
+      session.finishedAt = Date.now();
       session.signal = "SIGKILL";
       session.resolveExit();
     }
