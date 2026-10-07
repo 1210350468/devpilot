@@ -27,7 +27,7 @@ import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. Ordinary non-interactive process sessions auto-close after an idle lease; poll them when their result is still needed. For commands that have safely launched durable background work (for example a remote nohup/setsid job), prefer detach=true so DevPilot does not retain a useless local process session. Use auto_close=false only for intentionally persistent/interactive process sessions. In a continued Chat or attached Goal, workspace_turn may omit workspace_id when the server can resolve exactly one current workspace; if resolution is ambiguous it fails closed and you must provide an explicit id. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
+const CODEX_INSTRUCTIONS = `Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. After a workspace is open, prefer workspace_turn when several independent reads, short commands, process polls, or task-state operations are already known; keep individual tool calls for adaptive steps where one result determines the next action. Do not batch remote authentication, upload, restart, and verification steps when one depends on the prior result; run those adaptively so a blocked remote step cannot strand the whole batch. For unattended ssh/scp/git automation, prefer non_interactive=true and explicit fail-fast client options such as OpenSSH BatchMode=yes and ConnectTimeout so a missing key fails instead of waiting for credentials. Ordinary non-interactive process sessions auto-close after an idle lease; poll them when their result is still needed. For commands that have safely launched durable background work (for example a remote nohup/setsid job), prefer detach=true so DevPilot does not retain a useless local process session. Use auto_close=false only for intentionally persistent/interactive process sessions. In a continued Chat or attached Goal, workspace_turn may omit workspace_id when the server can resolve exactly one current workspace; if resolution is ambiguous it fails closed and you must provide an explicit id. For multi-turn work that is likely to continue, save a concise workspace_turn checkpoint after meaningful progress. When open_workspace returns a resume checkpoint, prefer a workspace_turn delta before broadly rereading project files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -58,6 +58,9 @@ const workspaceTurnExecSchema = z.object({
   kind: z.literal("exec"),
   cmd: z.string().min(1).describe("Shell command to execute."),
   working_directory: z.string().optional(),
+  non_interactive: z.boolean().optional().describe(
+    "Close stdin immediately and disable common credential prompts. Prefer for unattended ssh/scp/git automation so missing authentication fails fast instead of leaving a waiting process session.",
+  ),
   detach: z.boolean().optional().describe(
     "Detach the local command after the initial yield if it is still running. No process session is retained. Use only when the command has safely backgrounded the work it needs to keep running.",
   ),
@@ -322,6 +325,12 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           .describe(
             "Optional hard process runtime limit. At expiry DevPilot terminates the process tree even if it is still being polled.",
           ),
+        non_interactive: z
+          .boolean()
+          .optional()
+          .describe(
+            "Close stdin immediately and disable common credential prompts. Prefer for unattended ssh/scp/git automation. For OpenSSH also pass BatchMode=yes/ConnectTimeout explicitly when appropriate.",
+          ),
         working_directory: z
           .string()
           .optional()
@@ -358,6 +367,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       auto_close,
       idle_timeout_ms,
       max_runtime_ms,
+      non_interactive,
       working_directory,
       yield_time_ms,
       max_output_tokens,
@@ -395,6 +405,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             autoClose: auto_close,
             idleTimeoutMs: idle_timeout_ms,
             maxRuntimeMs: max_runtime_ms,
+            nonInteractive: non_interactive,
             yieldTimeMs,
             maxOutputTokens,
           });
@@ -631,6 +642,7 @@ function registerWorkspaceTurnTool(context: ToolRegistrationContext): void {
             autoClose: operation.auto_close,
             idleTimeoutMs: operation.idle_timeout_ms,
             maxRuntimeMs: operation.max_runtime_ms,
+            nonInteractive: operation.non_interactive,
             yieldTimeMs,
             maxOutputTokens: operation.max_output_tokens,
           });

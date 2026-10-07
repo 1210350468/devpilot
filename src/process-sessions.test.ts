@@ -58,6 +58,17 @@ const environment = await manager.start({
 assert.equal(environment.running, false);
 assert.match(environment.output, /1,dumb,cat,cat,cat,1,workspace-a,\/tmp\/devspace-workspace-a/);
 
+const nonInteractive = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "process.stdin.resume(); process.stdin.on('end', () => console.log([process.env.GIT_TERMINAL_PROMPT, process.env.GCM_INTERACTIVE, process.env.SSH_ASKPASS_REQUIRE].join(',')))"`,
+  yieldTimeMs: 2_000,
+  nonInteractive: true,
+});
+assert.equal(nonInteractive.running, false);
+assert.equal(nonInteractive.exitCode, 0);
+assert.match(nonInteractive.output, /0,Never,never/);
+
 const background = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

@@ -28,6 +28,7 @@ export interface StartCommandInput {
   autoClose?: boolean;
   idleTimeoutMs?: number;
   maxRuntimeMs?: number;
+  nonInteractive?: boolean;
 }
 
 export interface WriteStdinInput {
@@ -117,6 +118,7 @@ function terminalSize(value: number | undefined, fallback: number): number {
 function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
+  nonInteractive?: boolean;
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -132,6 +134,13 @@ function processEnvironment(input?: {
     LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
     ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
     ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
+    ...(input?.nonInteractive
+      ? {
+          GIT_TERMINAL_PROMPT: "0",
+          GCM_INTERACTIVE: "Never",
+          SSH_ASKPASS_REQUIRE: "never",
+        }
+      : {}),
   };
 }
 
@@ -388,6 +397,7 @@ export class ProcessSessionManager {
       env: processEnvironment({
         workspaceId: input.workspaceId,
         workspaceRoot: input.workspaceRoot,
+        nonInteractive: input.nonInteractive,
       }),
       stdio: "pipe",
       windowsHide: true,
@@ -404,6 +414,7 @@ export class ProcessSessionManager {
     child.stderr.on("data", (data: Buffer) => this.append(session, data.toString("utf8")));
     child.on("error", (error) => this.append(session, `${error.message}\n`));
     child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
+    if (input.nonInteractive) child.stdin.end();
     this.armLifecycleTimers(session);
   }
 
@@ -420,10 +431,11 @@ export class ProcessSessionManager {
     try {
       pty = nodePty.spawn(shell.executable, shell.args, {
         cwd: input.cwd,
-        env: processEnvironment({
-          workspaceId: input.workspaceId,
-          workspaceRoot: input.workspaceRoot,
-        }),
+      env: processEnvironment({
+        workspaceId: input.workspaceId,
+        workspaceRoot: input.workspaceRoot,
+        nonInteractive: input.nonInteractive,
+      }),
         name: "xterm-256color",
         cols: session.columns,
         rows: session.rows,
