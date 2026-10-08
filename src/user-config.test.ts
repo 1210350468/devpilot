@@ -47,6 +47,32 @@ withConfigDir((configDir, env) => {
   assert.equal(nextLoad.migratedLegacyConfig, false);
 });
 
+withConfigDir((configDir, env) => {
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({
+    host: "127.0.0.1",
+    port: 7681,
+    allowedRoots: ["E:\\coding", "E:\\minecraft"],
+    publicBaseUrl: "http://127.0.0.1:7681",
+    authMode: "secure-tunnel",
+    toolMode: "full",
+    widgets: "off",
+    subagents: false,
+  }));
+
+  const files = loadDevspaceFiles(env);
+  assert.equal(files.migratedLegacyConfig, true);
+  assert.equal(files.config.server.host, "127.0.0.1");
+  assert.equal(files.config.server.port, 7681);
+  assert.deepEqual(files.config.workspaces.allowedRoots, ["E:\\coding", "E:\\minecraft"]);
+  assert.equal(files.config.server.publicBaseUrl, "http://127.0.0.1:7681");
+  assert.equal(files.config.tools.mode, "codex");
+  assert.equal(files.config.ui.enabled, false);
+  assert.equal(files.config.subagents.enabled, false);
+  assert.equal(existsSync(join(configDir, "config.json")), false);
+  assert.equal(existsSync(join(configDir, "config.jsonc")), true);
+  assert.equal(existsSync(join(configDir, "config.json.v1.0.bak")), true);
+});
+
 await withConfigDirAsync(async (configDir) => {
   writeFileSync(join(configDir, "config.json"), JSON.stringify({
     port: 8787,

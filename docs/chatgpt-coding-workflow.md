@@ -178,7 +178,18 @@ DevSpace uses the Codex-style surface by default. It exposes:
 In this mode, `write`, `edit`, and `bash` are not registered. `exec_command`
 returns a process session ID when a command is still
 running after its yield window. Use `write_stdin` to poll it, send input, resize
-a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
+a PTY, or send Ctrl-C. The default command yield is 2 seconds so a long build
+or test hands control back to the host quickly instead of holding a model/tool
+round trip open for roughly 10 seconds; callers can still request up to the
+existing 12-second maximum when waiting inline is preferable. Set `tty: true`
+only for commands that need a terminal.
+
+For continued work, `workspace_turn` can omit `workspace_id` when the current
+Chat is already bound to exactly one active workspace. An attached non-terminal
+Goal is the strongest binding and keeps cross-Chat continuation on the Goal's
+persisted workspace. If an ordinary Chat has multiple active workspace
+bindings, DevSpace fails closed and requires an explicit `workspace_id` rather
+than guessing.
 
 Set `tools.mode` to `claude` in `~/.devspace/config.jsonc` to expose `write`,
 `edit`, and `bash` instead of the Codex mutation and command tools. Dedicated

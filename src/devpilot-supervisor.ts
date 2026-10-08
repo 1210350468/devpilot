@@ -6,10 +6,19 @@ import { fileURLToPath } from "node:url";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { getLocalAgentProviderAvailabilitySnapshot } from "./local-agent-availability.js";
+import { AsterBridgeRoxyGoalBrowserAdapter } from "./goal-browser-roxy.js";
+import { GoalStore } from "./goal-store.js";
+import type { GoalWatchdogOutcome } from "./goal-watchdog.js";
+import {
+  GoalWatchdogService,
+  type GoalWatchdogServiceSnapshot,
+} from "./goal-watchdog-service.js";
 import { terminateProcessTree } from "./process-platform.js";
 import { createServer } from "./server.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { RequestObserver } from "./request-observer.js";
+import { acquireTunnelLease, type TunnelLease } from "./tunnel-lease.js";
+import { TunnelHealthHistory, type TunnelHealthSnapshot } from "./connection-diagnostics.js";
 import { loadDevspaceFiles, setDevspaceConfigValues } from "./user-config.js";
 
 const OPENAI_TUNNEL_ID = /^tunnel_[0-9a-f]{32}$/;
@@ -18,7 +27,9 @@ const DEFAULT_CONTROL_HOST = "127.0.0.1";
 const DEFAULT_CONTROL_PORT = 47680;
 const DEFAULT_HEALTH_ADDR = "127.0.0.1:47683";
 const DEFAULT_START_TIMEOUT_MS = 30_000;
+const DEFAULT_PUBLIC_PROBE_TIMEOUT_MS = 15_000;
 const UI_BUILD_DIRECTORY = fileURLToPath(new URL("./ui/", import.meta.url));
+const DEV_PILOT_PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 export type DevPilotTunnelProvider = "none" | "cloudflare-quick" | "openai-secure";
 export type ServiceState = "stopped" | "starting" | "running" | "stopping" | "error";
@@ -78,7 +89,12 @@ export interface DevPilotStatus {
     ready?: boolean;
   };
   providers: ReturnType<typeof getLocalAgentProviderAvailabilitySnapshot>;
+  goalAutomation: GoalWatchdogServiceSnapshot;
   requestObserver: { enabled: true; retained: number };
+  diagnostics: {
+    requests: ReturnType<RequestObserver["diagnostics"]>;
+    tunnel: TunnelHealthSnapshot;
+  };
   events: EventEntry[];
 }
 
@@ -87,14 +103,21 @@ export class DevPilotSupervisor {
   readonly config: DevPilotSupervisorConfig;
   private serverConfig: ServerConfig;
   private readonly requestObserver = new RequestObserver();
+  private readonly tunnelHealth = new TunnelHealthHistory();
+  private tunnelHealthTimer?: ReturnType<typeof setInterval>;
   private running?: ReturnType<typeof createServer>;
   private serverHttp?: Server;
   private serverStatus: ServiceStatus = { state: "stopped" };
   private tunnelProcess?: ChildProcessWithoutNullStreams;
+  private tunnelLease?: TunnelLease;
   private tunnelPublicBaseUrl?: string;
+  private cloudflarePublicReady = false;
   private tunnelStatus: ServiceStatus = { state: "stopped" };
   private controlHttp?: Server;
   private readonly events: EventEntry[] = [];
+  private goalWatchdogStore?: GoalStore;
+  private goalWatchdog?: GoalWatchdogService;
+  private readonly goalWatchdogOutcomeKeys = new Map<string, string>();
 
   constructor(serverConfig: ServerConfig, config = loadDevPilotSupervisorConfig(process.env)) {
     this.serverConfig = serverConfig;
@@ -112,6 +135,7 @@ export class DevPilotSupervisor {
       http.once("error", reject);
     });
     this.pushEvent("info", `Control Center listening on ${this.controlUrl()}`);
+    this.startTunnelHealthMonitor();
     if (this.config.autoStart) {
       void this.startServices().catch((error) => this.pushEvent("error", `Auto-start failed: ${errorMessage(error)}`));
     }
@@ -119,6 +143,10 @@ export class DevPilotSupervisor {
   }
 
   async close(): Promise<void> {
+    if (this.tunnelHealthTimer) {
+      clearInterval(this.tunnelHealthTimer);
+      this.tunnelHealthTimer = undefined;
+    }
     await this.stopServices();
     if (!this.controlHttp) return;
     const http = this.controlHttp;
@@ -130,6 +158,7 @@ export class DevPilotSupervisor {
     if (this.config.tunnelProvider === "cloudflare-quick") {
       await this.startTunnel();
       await this.startServer();
+      await this.verifyCloudflarePublicReady();
       return;
     }
     await this.startServer();
@@ -151,14 +180,29 @@ export class DevPilotSupervisor {
     this.serverStatus = { state: "starting" };
     this.pushEvent("info", "Starting upstream DevSpace MCP server.");
     let running: ReturnType<typeof createServer> | undefined;
+    let goalWatchdogStore: GoalStore | undefined;
+    let goalWatchdog: GoalWatchdogService | undefined;
     try {
       const loadedConfig = loadConfig();
       this.serverConfig = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
-        ? { ...loadedConfig, publicBaseUrl: this.tunnelPublicBaseUrl }
+        ? {
+            ...loadedConfig,
+            publicBaseUrl: this.tunnelPublicBaseUrl,
+            allowedHosts: Array.from(new Set([
+              ...loadedConfig.allowedHosts,
+              new URL(this.tunnelPublicBaseUrl).hostname,
+            ])),
+          }
         : loadedConfig;
+      goalWatchdogStore = new GoalStore(this.serverConfig.stateDir);
+      goalWatchdog = new GoalWatchdogService(goalWatchdogStore, {
+        browserFactory: () => new AsterBridgeRoxyGoalBrowserAdapter(),
+        onOutcomes: (outcomes) => this.recordGoalWatchdogOutcomes(outcomes),
+      });
       running = createServer(this.serverConfig, {
         authMode: this.config.tunnelProvider === "openai-secure" ? "secure-tunnel" : "oauth",
         requestObserver: this.requestObserver,
+        onGoalChanged: () => goalWatchdog?.notify(),
       });
       const http = await new Promise<Server>((resolve, reject) => {
         const candidate = running!.app.listen(this.serverConfig.port, this.serverConfig.host, () => resolve(candidate));
@@ -166,9 +210,14 @@ export class DevPilotSupervisor {
       });
       this.running = running;
       this.serverHttp = http;
+      this.goalWatchdogStore = goalWatchdogStore;
+      this.goalWatchdog = goalWatchdog;
       this.serverStatus = { state: "running", pid: process.pid, startedAt: new Date().toISOString() };
       this.pushEvent("info", `MCP server ready on ${this.localMcpUrl()} (${this.serverConfig.toolMode} surface).`);
+      goalWatchdog.notify();
     } catch (error) {
+      await goalWatchdog?.stop().catch(() => undefined);
+      goalWatchdogStore?.close();
       await running?.close().catch(() => undefined);
       this.serverStatus = { state: "error", error: errorMessage(error) };
       this.pushEvent("error", `MCP server failed: ${errorMessage(error)}`);
@@ -178,6 +227,7 @@ export class DevPilotSupervisor {
 
   async stopServer(): Promise<void> {
     if (!this.serverHttp || !this.running) {
+      await this.stopGoalWatchdog();
       this.serverStatus = { state: "stopped" };
       return;
     }
@@ -187,6 +237,7 @@ export class DevPilotSupervisor {
     this.serverHttp = undefined;
     this.running = undefined;
     try {
+      await this.stopGoalWatchdog();
       await shutdownHttpServer(http, running.close);
       this.serverStatus = { state: "stopped" };
       this.pushEvent("info", "MCP server stopped.");
@@ -205,8 +256,10 @@ export class DevPilotSupervisor {
     this.pushEvent("info", this.config.tunnelProvider === "cloudflare-quick"
       ? "Starting Cloudflare Quick Tunnel."
       : `Starting OpenAI Secure MCP Tunnel ${this.config.tunnelId}.`);
+    let acquiredLease: TunnelLease | undefined;
     try {
       if (this.config.tunnelProvider === "cloudflare-quick") {
+        this.cloudflarePublicReady = false;
         const launched = await spawnCloudflareQuickTunnel({
           command: this.config.cloudflaredCommand,
           localOrigin: localOrigin(this.serverConfig.host, this.serverConfig.port),
@@ -219,13 +272,21 @@ export class DevPilotSupervisor {
           if (this.tunnelProcess !== launched.child) return;
           this.tunnelProcess = undefined;
           this.tunnelPublicBaseUrl = undefined;
+          this.cloudflarePublicReady = false;
           this.tunnelStatus = { state: "error", error: `cloudflared exited (${signal ?? code ?? "unknown"}).` };
           this.pushEvent("error", this.tunnelStatus.error!);
         });
-        this.pushEvent("info", `Cloudflare Quick Tunnel is READY at ${launched.publicBaseUrl}.`);
+        this.pushEvent("info", `Cloudflare Quick Tunnel connected at ${launched.publicBaseUrl}; waiting for public MCP readiness.`);
         return;
       }
 
+      acquiredLease = await acquireTunnelLease({
+        tunnelId: this.config.tunnelId!,
+        projectRoot: DEV_PILOT_PROJECT_ROOT,
+        controlPort: this.config.port,
+        mcpPort: this.serverConfig.port,
+      });
+      this.tunnelLease = acquiredLease;
       const child = await spawnOpenAiSecureTunnel({
         command: this.config.tunnelClientCommand,
         tunnelId: this.config.tunnelId!,
@@ -237,14 +298,21 @@ export class DevPilotSupervisor {
       });
       this.tunnelProcess = child;
       this.tunnelStatus = { state: "running", pid: child.pid, startedAt: new Date().toISOString() };
+      this.recordTunnelHealth(true);
       child.once("exit", (code, signal) => {
         if (this.tunnelProcess !== child) return;
         this.tunnelProcess = undefined;
+        const lease = this.tunnelLease;
+        this.tunnelLease = undefined;
+        if (lease && lease === acquiredLease) void lease.release().catch(() => undefined);
         this.tunnelStatus = { state: "error", error: `tunnel-client exited (${signal ?? code ?? "unknown"}).` };
+        this.recordTunnelHealth(false);
         this.pushEvent("error", this.tunnelStatus.error!);
       });
       this.pushEvent("info", "OpenAI Secure MCP Tunnel is READY.");
     } catch (error) {
+      if (acquiredLease && this.tunnelLease === acquiredLease) this.tunnelLease = undefined;
+      await acquiredLease?.release().catch(() => undefined);
       this.tunnelStatus = { state: "error", error: errorMessage(error) };
       this.pushEvent("error", `Tunnel start failed: ${errorMessage(error)}`);
       throw error;
@@ -253,8 +321,12 @@ export class DevPilotSupervisor {
 
   async stopTunnel(): Promise<void> {
     const child = this.tunnelProcess;
+    const lease = this.tunnelLease;
+    this.tunnelLease = undefined;
     if (!child) {
+      await lease?.release().catch(() => undefined);
       this.tunnelPublicBaseUrl = undefined;
+      this.cloudflarePublicReady = false;
       this.tunnelStatus = { state: "stopped" };
       return;
     }
@@ -262,7 +334,9 @@ export class DevPilotSupervisor {
     this.tunnelProcess = undefined;
     terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
     await waitForChildExit(child, 5_000);
+    await lease?.release().catch(() => undefined);
     this.tunnelPublicBaseUrl = undefined;
+    this.cloudflarePublicReady = false;
     this.tunnelStatus = { state: "stopped" };
     this.pushEvent("info", `${this.config.tunnelProvider === "cloudflare-quick" ? "Cloudflare Quick Tunnel" : "OpenAI Secure MCP Tunnel"} stopped.`);
   }
@@ -271,8 +345,11 @@ export class DevPilotSupervisor {
     const tunnelReady = this.config.tunnelProvider === "openai-secure"
       ? await isReady(this.healthUrl())
       : this.config.tunnelProvider === "cloudflare-quick"
-        ? this.tunnelStatus.state === "running" && Boolean(this.tunnelPublicBaseUrl)
+        ? this.tunnelStatus.state === "running" && this.cloudflarePublicReady
         : undefined;
+    if (typeof tunnelReady === "boolean" && this.tunnelStatus.state === "running") {
+      this.recordTunnelHealth(tunnelReady);
+    }
     const publicMcpUrl = this.config.tunnelProvider === "cloudflare-quick" && this.tunnelPublicBaseUrl
       ? new URL("/mcp", this.tunnelPublicBaseUrl).toString()
       : this.config.tunnelProvider === "openai-secure" && this.config.tunnelId
@@ -307,9 +384,18 @@ export class DevPilotSupervisor {
         ready: tunnelReady,
       },
       providers: getLocalAgentProviderAvailabilitySnapshot(process.env, this.serverConfig.subagents),
+      goalAutomation: this.goalWatchdog?.snapshot() ?? {
+        state: "stopped",
+        activeGoals: 0,
+        lastOutcomes: [],
+      },
       requestObserver: {
         enabled: true,
         retained: this.requestObserver.list(200).length,
+      },
+      diagnostics: {
+        requests: this.requestObserver.diagnostics(),
+        tunnel: this.tunnelHealth.snapshot(),
       },
       events: [...this.events].reverse(),
     };
@@ -433,9 +519,107 @@ export class DevPilotSupervisor {
     if (this.events.length > 80) this.events.splice(0, this.events.length - 80);
   }
 
+  private startTunnelHealthMonitor(): void {
+    if (this.config.tunnelProvider !== "openai-secure" || this.tunnelHealthTimer) return;
+    this.tunnelHealthTimer = setInterval(() => {
+      void this.sampleTunnelHealth();
+    }, 5_000);
+    this.tunnelHealthTimer.unref();
+    void this.sampleTunnelHealth();
+  }
+
+  private async sampleTunnelHealth(): Promise<void> {
+    if (this.tunnelStatus.state !== "running") return;
+    this.recordTunnelHealth(await isReady(this.healthUrl()));
+  }
+
+  private recordTunnelHealth(ready: boolean): void {
+    const transition = this.tunnelHealth.sample(ready);
+    if (!transition) return;
+    this.pushEvent(
+      ready ? "info" : "warn",
+      ready ? "OpenAI Secure MCP Tunnel readiness recovered." : "OpenAI Secure MCP Tunnel readiness lost.",
+    );
+  }
+
+  private async stopGoalWatchdog(): Promise<void> {
+    const watchdog = this.goalWatchdog;
+    const store = this.goalWatchdogStore;
+    this.goalWatchdog = undefined;
+    this.goalWatchdogStore = undefined;
+    if (watchdog) await watchdog.stop();
+    store?.close();
+    this.goalWatchdogOutcomeKeys.clear();
+  }
+
+  private recordGoalWatchdogOutcomes(outcomes: readonly GoalWatchdogOutcome[]): void {
+    for (const outcome of outcomes) {
+      if (outcome.kind === "generating" || outcome.kind === "pending_ack" || outcome.kind === "busy") continue;
+      const key = JSON.stringify(outcome);
+      if (this.goalWatchdogOutcomeKeys.get(outcome.goalId) === key) continue;
+      this.goalWatchdogOutcomeKeys.set(outcome.goalId, key);
+      if (outcome.kind === "sent_continue") {
+        this.pushEvent("info", `Goal ${outcome.goalId} continued in ChatGPT round ${outcome.roundNumber}.`);
+      } else if (outcome.kind === "sent_resume") {
+        this.pushEvent("info", `Goal ${outcome.goalId} rotated to a new ChatGPT conversation for round ${outcome.roundNumber}.`);
+      } else if (outcome.kind === "blocked") {
+        this.pushEvent("warn", `Goal ${outcome.goalId} automatic continuation stopped: ${outcome.reason}.`);
+      } else if (outcome.kind === "browser_unavailable") {
+        this.pushEvent("warn", `Goal ${outcome.goalId} browser continuation unavailable: ${outcome.detail ?? outcome.state}.`);
+      } else if (outcome.kind === "send_failed") {
+        this.pushEvent("warn", `Goal ${outcome.goalId} browser continuation send failed: ${outcome.error}.`);
+      }
+    }
+  }
+
   private localMcpUrl(): string {
     return `${localOrigin(this.serverConfig.host, this.serverConfig.port)}/mcp`;
   }
+
+  private async verifyCloudflarePublicReady(): Promise<void> {
+    const publicBaseUrl = this.tunnelPublicBaseUrl;
+    if (this.config.tunnelProvider !== "cloudflare-quick" || !publicBaseUrl) return;
+    const publicHost = new URL(publicBaseUrl).host;
+    const metadataUrl = new URL(
+      "/.well-known/oauth-protected-resource/mcp",
+      localOrigin(this.serverConfig.host, this.serverConfig.port),
+    ).toString();
+    const expectedResource = new URL("/mcp", publicBaseUrl).toString();
+    const deadline = Date.now() + DEFAULT_PUBLIC_PROBE_TIMEOUT_MS;
+    let lastError = "public MCP metadata is not ready";
+
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(metadataUrl, {
+          headers: {
+            accept: "application/json",
+            host: publicHost,
+          },
+          signal: AbortSignal.timeout(3_000),
+        });
+        if (response.ok) {
+          const metadata = await response.json() as { resource?: unknown };
+          if (metadata.resource === expectedResource) {
+            this.cloudflarePublicReady = true;
+            this.pushEvent("info", `Cloudflare Quick Tunnel is READY at ${publicBaseUrl}.`);
+            return;
+          }
+          lastError = `public MCP metadata returned an unexpected resource: ${String(metadata.resource)}`;
+        } else {
+          lastError = `public MCP metadata returned HTTP ${response.status}`;
+        }
+      } catch (error) {
+        lastError = errorMessage(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    this.cloudflarePublicReady = false;
+    this.tunnelStatus = { ...this.tunnelStatus, state: "error", error: lastError };
+    this.pushEvent("error", `Cloudflare public MCP readiness failed: ${lastError}`);
+    throw new Error(`Cloudflare public MCP readiness failed: ${lastError}`);
+  }
+
   private controlUrl(): string { return localOrigin(this.config.host, this.config.port); }
   private healthUrl(): string { return openAiTunnelHealthBaseUrl(this.config.tunnelHealthAddr); }
 }
@@ -531,7 +715,12 @@ function controlCenterHtml(): string {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DevPilot Control Center</title><style>:root{color-scheme:light;background:#f5f7fb;color:#162033;font-family:Inter,ui-sans-serif,system-ui,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#e8f1ff,transparent 34%),#f5f7fb}.wrap{max-width:1120px;margin:0 auto;padding:32px 22px 48px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.brand h1{margin:0;font-size:30px}.brand p{margin:6px 0 0;color:#667085}.pill{padding:8px 12px;border-radius:999px;background:#e9f9ef;color:#137a3c;font-weight:700}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.card{background:rgba(255,255,255,.92);border:1px solid #e6eaf0;border-radius:18px;padding:18px;box-shadow:0 12px 30px rgba(36,55,87,.06)}.card h2{font-size:15px;margin:0 0 14px;color:#667085}.value{font-size:24px;font-weight:800}.sub{font-size:13px;color:#667085;margin-top:8px;word-break:break-all}.ok{color:#138a4b}.bad{color:#c43232}.warn{color:#b56a00}.wide{grid-column:span 2}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}.btn{border:0;border-radius:12px;padding:11px 16px;font-weight:700;cursor:pointer}.primary{background:#1f6feb;color:white}.secondary{background:white;color:#25324a;border:1px solid #dce2ea}.danger{background:#fff0f0;color:#b42318;border:1px solid #ffd0d0}.tools{display:flex;flex-wrap:wrap;gap:8px}.tool{background:#eef4ff;color:#285ea8;border-radius:9px;padding:6px 9px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.provider{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eef1f5}.events{max-height:280px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.event{padding:7px 0;border-bottom:1px solid #eef1f5}.event time{color:#98a2b3;margin-right:8px}@media(max-width:800px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.top{align-items:flex-start;flex-direction:column}}</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>DevPilot Control Center</h1><p>Upstream-first DevSpace + OpenAI Secure MCP Tunnel</p></div><div id="healthPill" class="pill">Checking…</div></div><div class="actions"><button class="btn primary" onclick="act('start')">启动全部</button><button class="btn secondary" onclick="act('restart')">重启全部</button><button class="btn danger" onclick="act('stop')">停止全部</button><button class="btn secondary" onclick="refresh()">立即刷新</button></div><div class="grid"><section class="card"><h2>MCP Server</h2><div id="serverState" class="value">-</div><div id="serverMeta" class="sub"></div></section><section class="card"><h2>OpenAI Tunnel</h2><div id="tunnelState" class="value">-</div><div id="tunnelMeta" class="sub"></div></section><section class="card"><h2>Tool Surface</h2><div id="toolMode" class="value">-</div><div id="tools" class="tools" style="margin-top:10px"></div></section><section class="card wide"><h2>Providers</h2><div id="providers"></div></section><section class="card"><h2>Runtime</h2><div id="runtime" class="sub"></div></section><section class="card wide"><h2>Recent lifecycle events</h2><div id="events" class="events"></div></section></div></div><script>const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function stateClass(s){return s==='running'||s==='online'?'ok':s==='error'?'bad':s==='starting'||s==='stopping'?'warn':''}async function refresh(){try{const r=await fetch('/devpilot/api/status',{cache:'no-store'});const s=await r.json();document.getElementById('healthPill').textContent=s.server.status==='online'&&s.tunnel.ready?'READY':'ATTENTION';document.getElementById('healthPill').className='pill '+(s.server.status==='online'&&s.tunnel.ready?'ok':'warn');document.getElementById('serverState').innerHTML='<span class="'+stateClass(s.server.state)+'">'+esc(s.server.state)+'</span>';document.getElementById('serverMeta').innerHTML=esc(s.server.localMcpUrl)+'<br>PID '+esc(s.server.pid??'-');document.getElementById('tunnelState').innerHTML='<span class="'+stateClass(s.tunnel.state)+'">'+esc(s.tunnel.state)+'</span>';document.getElementById('tunnelMeta').innerHTML='ready='+esc(s.tunnel.ready)+'<br>'+esc(s.tunnel.tunnelId??'no tunnel')+'<br>'+esc(s.tunnel.healthUrl??'');document.getElementById('toolMode').textContent=s.server.toolMode;document.getElementById('tools').innerHTML=s.server.tools.map(x=>'<span class="tool">'+esc(x)+'</span>').join('');document.getElementById('providers').innerHTML=s.providers.map(p=>'<div class="provider"><span>'+esc(p.name)+'</span><strong class="'+(p.available?'ok':'bad')+'">'+(p.available?'available':'unavailable')+'</strong></div>').join('');document.getElementById('runtime').innerHTML='Supervisor PID '+esc(s.supervisor.pid)+'<br>Control '+esc(s.supervisor.host)+':'+esc(s.supervisor.port)+'<br>Architecture '+esc(s.architecture);document.getElementById('events').innerHTML=s.events.map(e=>'<div class="event"><time>'+esc(new Date(e.at).toLocaleTimeString())+'</time>'+esc(e.message)+'</div>').join('');}catch(e){document.getElementById('healthPill').textContent='OFFLINE';document.getElementById('healthPill').className='pill bad'}}async function act(name){await fetch('/devpilot/api/services/'+name,{method:'POST',headers:{'x-devpilot-control':'1'}});await refresh()}refresh();setInterval(refresh,2000);</script></body></html>`;
 }
 
-function toolsForMode(mode: ServerConfig["toolMode"]): string[] { return mode === "codex" ? ["open_workspace", "read", "show_changes", "apply_patch", "exec_command", "write_stdin"] : ["open_workspace", "read", "show_changes", "write", "edit", "bash"]; }
+function toolsForMode(mode: ServerConfig["toolMode"]): string[] {
+  const surface = mode === "codex"
+    ? ["open_workspace", "read", "show_changes", "apply_patch", "exec_command", "write_stdin", "workspace_turn"]
+    : ["open_workspace", "read", "show_changes", "write", "edit", "bash"];
+  return [...surface, "goal"];
+}
 function queryString(req: Request, key: string): string | undefined { const value = req.query[key]; return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function queryPositiveInteger(req: Request, key: string, fallback: number, maximum: number): number { const value = queryString(req, key); if (!value) return fallback; const parsed = Number(value); if (!Number.isInteger(parsed) || parsed < 1) return fallback; return Math.min(parsed, maximum); }
 function localOnlyMiddleware() { return (req: Request, res: Response, next: NextFunction): void => { const address = req.socket.remoteAddress?.replace(/^::ffff:/, "") ?? ""; if (address !== "127.0.0.1" && address !== "::1") { res.status(403).json({ error: "DevPilot Control Center is loopback-only." }); return; } next(); }; }

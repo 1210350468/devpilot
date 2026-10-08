@@ -16,6 +16,7 @@ import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
+import { GoalStore } from "./goal-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
@@ -28,11 +29,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "write", "edit", "bash", "show_changes"],
+      expected: ["open_workspace", "read", "write", "edit", "bash", "goal", "show_changes"],
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "show_changes"],
+      expected: ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin", "workspace_turn", "goal", "show_changes"],
     },
   ];
 
@@ -47,6 +48,123 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       );
     });
   }
+});
+
+test("persistent goal attaches across ChatGPT conversations and refuses premature completion", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(await callOpen(context.client, context.project, "goal-chat-a"));
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const started = structuredContent(await callGoal(context.client, {
+    action: "start",
+    workspace_id: workspaceId,
+    objective: "Complete a durable test Goal.",
+    criteria: [{ id: "tests", description: "Focused tests pass." }],
+    constraints: ["Do not touch production."],
+    next_step: "Run the focused test.",
+  }, "goal-chat-a"));
+  const startedGoal = started.goal as Record<string, unknown>;
+  const goalId = startedGoal.goal_id;
+  assert.equal(typeof goalId, "string");
+  assert.equal(startedGoal.workspace_id, workspaceId);
+  assert.equal(startedGoal.status, "running");
+
+  const sameChat = structuredContent(await callGoal(context.client, { action: "status" }, "goal-chat-a"));
+  assert.equal((sameChat.goal as Record<string, unknown>).goal_id, goalId);
+
+  const premature = await callGoal(context.client, { action: "finish" }, "goal-chat-a");
+  assert.equal(premature.isError, true);
+  assert.equal(structuredContent(premature).error_code, "GOAL_NOT_COMPLETE");
+
+  const attached = structuredContent(await callGoal(context.client, {
+    action: "attach",
+    goal_id: goalId,
+  }, "goal-chat-b"));
+  assert.equal((attached.goal as Record<string, unknown>).workspace_id, workspaceId);
+
+  const verified = structuredContent(await callGoal(context.client, {
+    action: "verify",
+    criterion_updates: [{
+      id: "tests",
+      status: "passed",
+      evidence: [{ kind: "test", summary: "Focused test passed.", ref: "run-1" }],
+      verification_source: "server.test.ts",
+    }],
+  }, "goal-chat-b"));
+  assert.equal((verified.goal as Record<string, unknown>).status, "verifying");
+
+  const finished = structuredContent(await callGoal(context.client, { action: "finish" }, "goal-chat-b"));
+  assert.equal((finished.goal as Record<string, unknown>).status, "succeeded");
+  assert.equal((finished.goal as Record<string, unknown>).workspace_id, workspaceId);
+});
+
+test("Goal responses advertise bounded recovery context readable through read and workspace_turn", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const conversationScopeId = "goal-context-chat";
+  const opened = structuredContent(await callOpen(context.client, context.project, conversationScopeId));
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedResponse = await callGoal(context.client, {
+    action: "start",
+    workspace_id: workspaceId,
+    objective: "Recover a long task with bounded external context.",
+    criteria: [{ id: "tests", description: "Context hydration tests pass." }],
+    constraints: ["Do not replay the old transcript."],
+    next_step: "Debug the recovery cache.",
+  }, conversationScopeId);
+  const started = structuredContent(startedResponse);
+  const goalId = (started.goal as Record<string, unknown>).goal_id;
+  assert.equal(typeof goalId, "string");
+  const recoveryContext = started.recovery_context as Record<string, unknown>;
+  assert.equal(recoveryContext.hydrate_ref, `@context/${goalId}/hydrate.md`);
+  assert.equal(recoveryContext.manifest_ref, `@context/${goalId}/manifest.md`);
+  assert.equal(recoveryContext.derived, true);
+  assert.equal(typeof recoveryContext.generated_at, "string");
+  assert.match(String(started.result), new RegExp(`Recovery context: @context/${goalId}/hydrate\\.md`));
+  assert.match(JSON.stringify(startedResponse.content), new RegExp(`@context/${goalId}/hydrate\\.md`));
+
+  await callGoal(context.client, {
+    action: "checkpoint",
+    goal_id: goalId,
+    summary: "Debugged the recovery cache; verify the focused suite next.",
+    current_step: "Verify context hydration.",
+    next_step: "Run focused tests.",
+    resume_capsule: {
+      decisions: ["Keep Goal DB and Git/filesystem authoritative."],
+      current_state: "The derived Markdown cache is available.",
+      current_problem: "Need to prove fresh Chat hydration stays bounded.",
+      next_actions: ["Read hydrate.md, then run focused tests."],
+      failures: ["Do not load the full historical transcript by default."],
+      evidence: ["Goal context is stored outside the project checkout."],
+    },
+  }, conversationScopeId);
+
+  const hydrateRef = `@context/${goalId}/hydrate.md`;
+  const direct = await context.client.callTool({
+    name: "read",
+    arguments: { workspace_id: workspaceId, path: hydrateRef },
+  });
+  assert.equal(direct.isError, undefined);
+  const directText = String(structuredContent(direct).result ?? "");
+  assert.match(directText, /Derived recovery cache — not authoritative/);
+  assert.match(directText, /Keep Goal DB and Git\/filesystem authoritative/);
+  assert.match(directText, /Need to prove fresh Chat hydration stays bounded/);
+
+  const batched = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      max_result_chars: 4_000,
+      operations: [{ kind: "read", path: hydrateRef }],
+    },
+  });
+  assert.equal(batched.isError, undefined);
+  const step = (structuredContent(batched).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(step?.ok, true);
+  assert.match(String(step?.result ?? ""), /Goal Recovery Hydration/);
+  assert.ok(String(step?.result ?? "").length <= 4_000);
 });
 
 test("model-facing tool schemas use snake_case recursively", async (t) => {
@@ -68,7 +186,7 @@ test("model-facing tool schemas use snake_case recursively", async (t) => {
   }
 });
 
-test("Codex process tools bound model-facing yield windows to 12 seconds", async (t) => {
+test("Codex process tools accept cached 12-second requests but advertise a four-second effective cap", async (t) => {
   const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
   const tools = await context.client.listTools();
 
@@ -80,8 +198,306 @@ test("Codex process tools bound model-facing yield windows to 12 seconds", async
     } | undefined;
 
     assert.equal(yieldSchema?.maximum, 12_000);
-    assert.match(yieldSchema?.description ?? "", /maximum 12000/i);
+    assert.match(yieldSchema?.description ?? "", /effective synchronous wait is capped at 4000/i);
+    if (toolName === "exec_command") {
+      assert.match(yieldSchema?.description ?? "", /defaults to 2000/i);
+    } else {
+      assert.match(yieldSchema?.description ?? "", /polling defaults to 2000/i);
+    }
   }
+});
+
+test("exec_command detach returns without retaining a process session", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "detached-process"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const node = JSON.stringify(process.execPath);
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: `${node} -e "console.log('detached-ready'); setTimeout(() => {}, 800)"`,
+      yield_time_ms: 250,
+      detach: true,
+    },
+  });
+  const structured = structuredContent(response);
+
+  assert.equal(response.isError, undefined);
+  assert.equal(structured.detached, true);
+  assert.equal(structured.running, false);
+  assert.equal(structured.session_id, undefined);
+  assert.equal(structured.exit_code, undefined);
+  assert.match(String(structured.result), /detached-ready/);
+  assert.match(String(structured.result), /no DevPilot process session is retained/i);
+});
+
+test("standalone Codex process tools clamp cached 12-second waits to four seconds", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "standalone-yield-cap"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedAt = performance.now();
+  const response = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspace_id: workspaceId,
+      cmd: "node -e \"setTimeout(() => {}, 8000)\"",
+      yield_time_ms: 12_000,
+    },
+  });
+  const elapsedMs = performance.now() - startedAt;
+  const structured = structuredContent(response);
+  const sessionId = structured.session_id;
+
+  assert.equal(response.isError, undefined);
+  assert.equal(structured.running, true);
+  assert.equal(typeof sessionId, "number");
+  assert.ok(elapsedMs < 5_000, `exec_command held the MCP call for ${Math.round(elapsedMs)}ms`);
+
+  if (typeof sessionId === "number") {
+    await context.client.callTool({
+      name: "write_stdin",
+      arguments: {
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        chars: "\u0003",
+        yield_time_ms: 12_000,
+      },
+    });
+  }
+});
+
+test("workspace_turn batches reads and commands in one Codex tool call", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  await writeFile(join(context.project, "batch.txt"), "batch-read\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [
+        { kind: "read", path: "batch.txt" },
+        { kind: "exec", cmd: "node -e \"console.log('batch-command')\"" },
+      ],
+    },
+  });
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.completed, 2);
+  assert.equal(structured.requested, 2);
+  assert.equal(structured.stopped_early, false);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  assert.equal(steps.length, 2);
+  assert.deepEqual(steps.map((step) => step.kind), ["read", "exec"]);
+  assert.equal(steps.every((step) => step.ok === true), true);
+  assert.match(String(steps[0]?.result ?? ""), /batch-read/);
+  assert.match(String(steps[1]?.result ?? ""), /batch-command/);
+  const rendered = JSON.stringify(response.content);
+  assert.match(rendered, /Workspace turn completed 2\/2 operation/);
+  assert.doesNotMatch(rendered, /batch-read/);
+  assert.doesNotMatch(rendered, /batch-command/);
+});
+
+test("workspace_turn keeps long batched commands within a short synchronous wait budget", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-wait-budget"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const startedAt = performance.now();
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+        { kind: "exec", cmd: "node -e \"setTimeout(() => {}, 5000)\"" },
+      ],
+    },
+  });
+  const elapsedMs = performance.now() - startedAt;
+  const structured = structuredContent(response);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  const sessionIds = steps
+    .map((step) => step.session_id)
+    .filter((value): value is number => typeof value === "number");
+  for (const sessionId of sessionIds) {
+    await context.client.callTool({
+      name: "write_stdin",
+      arguments: {
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        chars: "\u0003",
+        yield_time_ms: 1_000,
+      },
+    });
+  }
+
+  assert.equal(response.isError, undefined);
+  assert.equal(steps.length, 3);
+  assert.equal(steps.every((step) => step.running === true), true);
+  assert.equal(steps.every((step) => typeof step.session_id === "number"), true);
+  assert.ok(elapsedMs < 4_000, `workspace_turn held the MCP call for ${Math.round(elapsedMs)}ms`);
+});
+
+test("workspace_turn resolves the only workspace bound to the current Chat", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-auto"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  await writeFile(join(context.project, "auto.txt"), "auto-workspace\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      operations: [{ kind: "read", path: "auto.txt" }],
+    },
+    _meta: { "openai/session": "workspace-turn-auto" },
+  } as Parameters<Client["callTool"]>[0]);
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.workspace_id, workspaceId);
+  assert.match(String((structured.steps as Array<Record<string, unknown>>)[0]?.result), /auto-workspace/);
+});
+
+test("an active Goal resolves workspace_turn even when the Chat has multiple workspace bindings", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const conversationScopeId = "workspace-turn-goal-auto";
+  const first = structuredContent(
+    await callOpen(context.client, context.project, conversationScopeId),
+  );
+  const firstWorkspaceId = first.workspace_id;
+  assert.equal(typeof firstWorkspaceId, "string");
+
+  const otherProject = join(context.project, "..", "other-project");
+  await mkdir(otherProject);
+  await writeFile(join(otherProject, "AGENTS.md"), "other project instructions\n");
+  const second = structuredContent(await callOpen(context.client, otherProject, conversationScopeId));
+  assert.notEqual(second.workspace_id, firstWorkspaceId);
+
+  await callGoal(context.client, {
+    action: "start",
+    workspace_id: firstWorkspaceId,
+    objective: "Keep workspace_turn on the Goal workspace.",
+    criteria: [{ id: "done", description: "Resolver test completes." }],
+  }, conversationScopeId);
+  await writeFile(join(context.project, "goal-auto.txt"), "goal-workspace\n");
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      operations: [{ kind: "read", path: "goal-auto.txt" }],
+    },
+    _meta: { "openai/session": conversationScopeId },
+  } as Parameters<Client["callTool"]>[0]);
+
+  assert.equal(response.isError, undefined);
+  const structured = structuredContent(response);
+  assert.equal(structured.workspace_id, firstWorkspaceId);
+  assert.match(String((structured.steps as Array<Record<string, unknown>>)[0]?.result), /goal-workspace/);
+});
+
+test("workspace_turn fairly bounds aggregate model-readable result context", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const workspaceId = structuredContent(
+    await callOpen(context.client, context.project, "workspace-turn-budget"),
+  ).workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  const largeA = Array.from({ length: 500 }, (_, index) => `A${index.toString().padStart(4, "0")}-${"a".repeat(48)}`).join("\n");
+  const largeB = Array.from({ length: 500 }, (_, index) => `B${index.toString().padStart(4, "0")}-${"b".repeat(48)}`).join("\n");
+  await writeFile(join(context.project, "large-a.txt"), `${largeA}\n`);
+  await writeFile(join(context.project, "large-b.txt"), `${largeB}\n`);
+
+  const response = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      max_result_chars: 4_000,
+      operations: [
+        { kind: "read", path: "large-a.txt", limit: 500 },
+        { kind: "read", path: "large-b.txt", limit: 500 },
+      ],
+    },
+  });
+  const structured = structuredContent(response);
+  assert.equal(structured.result_char_budget, 4_000);
+  assert.equal(structured.result_chars, 4_000);
+  assert.equal(structured.truncated_results, 2);
+  const steps = structured.steps as Array<Record<string, unknown>>;
+  assert.equal(steps.length, 2);
+  assert.equal(steps.every((step) => step.result_truncated === true), true);
+  assert.equal(steps.every((step) => String(step.result ?? "").length === 2_000), true);
+  assert.match(String(steps[0]?.result ?? ""), /result truncated to the turn context budget/);
+  assert.match(String(steps[1]?.result ?? ""), /result truncated to the turn context budget/);
+});
+
+test("workspace_turn checkpoints resume task state and report bounded workspace deltas", async (t) => {
+  const context = await fixture(t, { git: true, toolMode: "codex", uiEnabled: false });
+  const opened = structuredContent(
+    await callOpen(context.client, context.project, "workspace-task-resume"),
+  );
+  const workspaceId = opened.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+
+  const checkpointResponse = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [{
+        kind: "checkpoint",
+        status: "active",
+        summary: "Implemented task checkpoint persistence.",
+        next_step: "Validate workspace delta behavior.",
+      }],
+    },
+  });
+  const checkpoint = (structuredContent(checkpointResponse).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(checkpoint?.ok, true);
+  assert.equal(checkpoint?.checkpoint_status, "active");
+
+  await writeFile(join(context.project, "README.md"), "hello\nchanged after checkpoint\n");
+  await writeFile(join(context.project, "later.txt"), "later\n");
+  const deltaResponse = await context.client.callTool({
+    name: "workspace_turn",
+    arguments: {
+      workspace_id: workspaceId,
+      operations: [{ kind: "delta", max_files: 1 }],
+    },
+  });
+  const delta = (structuredContent(deltaResponse).steps as Array<Record<string, unknown>>)[0];
+  assert.equal(delta?.ok, true);
+  assert.equal(delta?.changed_file_count, 2);
+  assert.equal((delta?.changed_files as string[]).length, 1);
+  assert.equal(delta?.omitted_files, 1);
+  assert.match(String(delta?.result ?? ""), /Implemented task checkpoint persistence/);
+  assert.match(String(delta?.result ?? ""), /Validate workspace delta behavior/);
+
+  const resumed = structuredContent(
+    await callOpen(context.client, context.project, "workspace-task-resume"),
+  );
+  assert.equal(resumed.workspace_id, workspaceId);
+  const resume = resumed.resume as Record<string, unknown>;
+  assert.equal(resume.status, "active");
+  assert.equal(resume.summary, "Implemented task checkpoint persistence.");
+  assert.equal(resume.next_step, "Validate workspace delta behavior.");
+  assert.match(String(resumed.instruction), /Resume checkpoint/);
+  assert.match(String(resumed.instruction), /workspace_turn delta/);
 });
 
 test("Claude edit and bash tools accept snake_case runtime inputs", async (t) => {
@@ -541,7 +957,7 @@ test("server shutdown waits for an active MCP tool call", async (t) => {
       arguments: {
         workspace_id: workspaceId,
         cmd: `node -e \"${command}\"`,
-        yield_time_ms: 12_000,
+        yield_time_ms: 4_000,
       },
     },
   );
@@ -714,10 +1130,12 @@ async function fixture(
     resolveProviderAvailability(),
   );
   const store = new SqliteWorkspaceStore(stateDir);
+  const goalStore = new GoalStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
   const server = createMcpServer(
     config,
     workspaces,
+    goalStore,
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
     resolveLocalAgentProviders,
@@ -736,6 +1154,7 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
+    goalStore.close();
     store.close();
   };
 
@@ -881,22 +1300,5 @@ async function callOpen(
   const params = {
     name: "open_workspace",
     arguments: { path },
-    ...(conversationScopeId
-      ? { _meta: { "openai/session": conversationScopeId } }
-      : {}),
-  } as Parameters<Client["callTool"]>[0];
-  return client.callTool(params);
-}
 
-function structuredContent(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
-  assert.ok(result.structuredContent);
-  return result.structuredContent as Record<string, unknown>;
-}
-
-function responseCard(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
-  const metadata = result._meta;
-  assert.ok(metadata && typeof metadata === "object");
-  const card = (metadata as Record<string, unknown>).card;
-  assert.ok(card && typeof card === "object");
-  return card as Record<string, unknown>;
-}
+[Showing lines 1-1302 of 1337 (50.0KB limit). Use offset=1303 to continue.]

@@ -11,6 +11,9 @@ const legacyConfigSchema = z.object({
   host: z.string().optional(),
   port: z.number().optional(),
   tool_mode: z.enum(["claude", "codex"]).optional(),
+  toolMode: z.enum(["minimal", "full", "codex"]).optional(),
+  authMode: z.enum(["oauth", "secure-tunnel"]).optional(),
+  widgets: z.enum(["off", "changes", "full"]).optional(),
   allowedRoots: z.array(z.string()).optional(),
   publicBaseUrl: z.string().nullable().optional(),
   allowedHosts: z.array(z.string()).optional(),
@@ -32,6 +35,9 @@ const LEGACY_CONFIG_KEYS = new Set([
   "host",
   "port",
   "tool_mode",
+  "toolMode",
+  "authMode",
+  "widgets",
   "allowedRoots",
   "publicBaseUrl",
   "allowedHosts",
@@ -67,8 +73,12 @@ export function migrateLegacyConfig(value: unknown): DevspaceConfig {
       worktreeRoot: legacy.worktreeRoot,
     }),
     storage: definedEntries({ stateDir: legacy.stateDir }),
-    tools: definedEntries({ mode: legacy.tools?.mode ?? legacy.tool_mode }),
-    ui: definedEntries({ enabled: legacy.ui?.enabled }),
+    tools: definedEntries({
+      mode: legacy.tools?.mode ?? legacy.tool_mode ?? migrateLegacyToolMode(legacy.toolMode),
+    }),
+    ui: definedEntries({
+      enabled: legacy.ui?.enabled ?? migrateLegacyWidgets(legacy.widgets),
+    }),
     artifacts: definedEntries({
       enabled: legacy.artifactsEnabled,
       maxFileBytes: legacy.artifactMaxFileBytes,
@@ -76,6 +86,20 @@ export function migrateLegacyConfig(value: unknown): DevspaceConfig {
     skills: definedEntries({ agentDir: legacy.agentDir }),
     subagents: migrateLegacySubagents(legacy.subagents),
   });
+}
+
+function migrateLegacyToolMode(
+  value: "minimal" | "full" | "codex" | undefined,
+): "codex" | undefined {
+  if (value === undefined) return undefined;
+  return "codex";
+}
+
+function migrateLegacyWidgets(
+  value: "off" | "changes" | "full" | undefined,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value !== "off";
 }
 
 function definedEntries<T extends Record<string, unknown>>(value: T): Partial<T> {

@@ -6,6 +6,8 @@ import type {
   WorkspaceMode,
   WorkspaceSession,
   WorkspaceStore,
+  WorkspaceTaskCheckpoint,
+  WorkspaceTaskStatus,
 } from "./workspace-store.js";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -34,6 +36,7 @@ import {
   loadLocalAgentProfiles,
   type LocalAgentProfile,
 } from "./local-agent-profiles.js";
+import { resolveGoalContextReadPath } from "./goal-context.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -62,6 +65,12 @@ export interface Workspace {
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
   agentProfiles: LocalAgentProfile[];
+  bootstrapContext?: WorkspaceBootstrapContext;
+}
+
+interface WorkspaceBootstrapContext {
+  agentsFiles: LoadedAgentsFile[];
+  availableAgentsFiles: AvailableAgentsFile[];
 }
 
 export interface WorkspaceContext {
@@ -84,6 +93,7 @@ export interface OpenWorkspaceInput {
   path: string;
   mode?: WorkspaceMode;
   baseRef?: string;
+  refreshContext?: boolean;
 }
 
 export interface OpenWorkspaceOptions {
@@ -180,7 +190,10 @@ export class WorkspaceRegistry {
       const reusableWorkspace = await this.findReusableCheckoutWorkspace(binding);
 
       if (reusableWorkspace) {
-        const context = await this.reusedWorkspaceContext(reusableWorkspace);
+        const context = await this.reusedWorkspaceContext(
+          reusableWorkspace,
+          input.refreshContext ?? false,
+        );
         this.store?.touchConversationBinding(conversationScopeId, targetKey);
         return {
           ...context,
@@ -242,15 +255,18 @@ export class WorkspaceRegistry {
     return JSON.stringify(["checkout", projectKey, null]);
   }
 
-  private async reusedWorkspaceContext(workspace: Workspace): Promise<WorkspaceContext> {
-    workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
-    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+  private async reusedWorkspaceContext(
+    workspace: Workspace,
+    refreshContext: boolean,
+  ): Promise<WorkspaceContext> {
+    const bootstrapContext = refreshContext || !workspace.bootstrapContext
+      ? await this.refreshWorkspaceBootstrapContext(workspace)
+      : workspace.bootstrapContext;
 
     return {
       workspace,
-      agentsFiles,
-      availableAgentsFiles,
+      agentsFiles: bootstrapContext.agentsFiles,
+      availableAgentsFiles: bootstrapContext.availableAgentsFiles,
       workspaceReused: true,
       includeBootstrapContext: true,
     };
@@ -322,6 +338,38 @@ export class WorkspaceRegistry {
     this.rememberWorkspace(restoredWorkspace);
 
     return restoredWorkspace;
+  }
+
+  async resolveUniqueConversationWorkspaceId(conversationScopeId: string): Promise<string | undefined> {
+    if (!this.store) return undefined;
+    const workspaceIds = Array.from(new Set(
+      this.store.listConversationBindings(conversationScopeId)
+        .map((binding) => binding.workspaceSessionId),
+    ));
+    const activeWorkspaceIds: string[] = [];
+    for (const workspaceId of workspaceIds) {
+      const session = this.store.getSession(workspaceId);
+      if (!session || session.status !== "active") continue;
+      try {
+        await this.getWorkspace(workspaceId);
+        activeWorkspaceIds.push(workspaceId);
+      } catch (error) {
+        if (
+          error instanceof AccessDeniedError
+          || (isErrnoException(error) && (error.code === "ENOENT" || error.code === "ENOTDIR"))
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (activeWorkspaceIds.length === 0) return undefined;
+    if (activeWorkspaceIds.length > 1) {
+      throw new Error(
+        `Conversation is bound to multiple active workspaces (${activeWorkspaceIds.join(", ")}); provide workspace_id explicitly.`,
+      );
+    }
+    return activeWorkspaceIds[0];
   }
 
   private async ensurePrunedWorkspaceRestored(
@@ -401,6 +449,17 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const goalContextRead = resolveGoalContextReadPath(
+      this.config.stateDir,
+      workspace.id,
+      inputPath,
+    );
+    if (goalContextRead) {
+      return {
+        absolutePath: goalContextRead.absolutePath,
+        readRoots: [workspace.root, goalContextRead.root],
+      };
+    }
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
@@ -424,6 +483,28 @@ export class WorkspaceRegistry {
   resolveWorkingDirectory(workspace: Workspace, workingDirectory: string | undefined): string {
     const directory = workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
     return assertAllowedPath(directory, [workspace.root]);
+  }
+
+  getTaskCheckpoint(workspaceId: string): WorkspaceTaskCheckpoint | undefined {
+    return this.store?.getTaskCheckpoint(workspaceId);
+  }
+
+  setTaskCheckpoint(
+    workspaceId: string,
+    input: {
+      status: WorkspaceTaskStatus;
+      summary: string;
+      nextStep?: string;
+      snapshotRef?: string;
+    },
+  ): WorkspaceTaskCheckpoint {
+    if (!this.store) {
+      throw new Error("Workspace task checkpoints require persistent workspace state.");
+    }
+    return this.store.setTaskCheckpoint({
+      workspaceSessionId: workspaceId,
+      ...input,
+    });
   }
 
   private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {
@@ -476,9 +557,10 @@ export class WorkspaceRegistry {
       baseSha: workspace.worktree?.baseSha,
       managed: workspace.worktree?.managed,
     });
-    this.rememberWorkspace(workspace);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    workspace.bootstrapContext = { agentsFiles, availableAgentsFiles };
+    this.rememberWorkspace(workspace);
 
     return {
       workspace,
@@ -507,6 +589,18 @@ export class WorkspaceRegistry {
       skills: result.skills,
       skillDiagnostics: result.diagnostics,
     };
+  }
+
+  private async refreshWorkspaceBootstrapContext(
+    workspace: Workspace,
+  ): Promise<WorkspaceBootstrapContext> {
+    Object.assign(workspace, this.loadSkillsForWorkspace(workspace.root));
+    workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
+    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
+    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const bootstrapContext = { agentsFiles, availableAgentsFiles };
+    workspace.bootstrapContext = bootstrapContext;
+    return bootstrapContext;
   }
 
   private assertWorkspaceRootAllowed(root: string, mode: WorkspaceMode, sourceRoot: string | undefined): string {
@@ -628,6 +722,7 @@ const SKIPPED_CONTEXT_DIRS = new Set([
   ".turbo",
   ".cache",
 ]);
+const CONTEXT_SCAN_DIRECTORY_CONCURRENCY = 24;
 
 export function formatAgentsPath(path: string, workspaceRoot: string | undefined): string {
   if (!workspaceRoot) return path.split(sep).join("/");
@@ -687,23 +782,34 @@ async function walkWorkspace(
   directory: string,
   visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
 ): Promise<void> {
-  let entries;
-  try {
-    entries = await opendir(directory);
-  } catch {
-    return;
-  }
+  const pendingDirectories = [directory];
 
-  for await (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-        await walkWorkspace(path, visit);
+  while (pendingDirectories.length > 0) {
+    const batch = pendingDirectories.splice(0, CONTEXT_SCAN_DIRECTORY_CONCURRENCY);
+    const nestedDirectories = await Promise.all(batch.map(async (currentDirectory) => {
+      let entries;
+      try {
+        entries = await opendir(currentDirectory);
+      } catch {
+        return [] as string[];
       }
-      continue;
-    }
 
-    await visit(path, entry);
+      const discoveredDirectories: string[] = [];
+      for await (const entry of entries) {
+        const path = join(currentDirectory, entry.name);
+        if (entry.isDirectory()) {
+          if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) discoveredDirectories.push(path);
+          continue;
+        }
+
+        await visit(path, entry);
+      }
+      return discoveredDirectories;
+    }));
+
+    for (const directories of nestedDirectories) {
+      pendingDirectories.push(...directories);
+    }
   }
 }
 

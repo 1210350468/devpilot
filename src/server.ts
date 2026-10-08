@@ -48,6 +48,8 @@ import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { GoalStore } from "./goal-store.js";
+import { registerGoalTool } from "./goal-tool.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -136,8 +138,9 @@ function serverInstructions(
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in available_agents_files, use ${toolNames.read} to inspect that instruction file and follow it. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
+  const goalInstruction = " When the user explicitly asks for a persistent Goal, use the goal tool to store its objective, acceptance criteria, evidence, and resumable state. The host remains the reasoning agent; do not substitute local subagents for Goal reasoning unless the user separately requests them.";
 
-  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
+  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}${goalInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -309,11 +312,13 @@ async function assertWorkspaceAppAssets(): Promise<void> {
 export function createMcpServer(
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
+  goalStore: GoalStore,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  onGoalChanged?: () => void,
 ): McpServer {
   const toolSurface = getToolSurface(config.toolMode);
   const server = new McpServer(
@@ -327,11 +332,13 @@ export function createMcpServer(
     server,
     config,
     workspaces,
+    goalStore,
     reviewCheckpoints,
     processSessions,
     resolveLocalAgentProviders,
     incomingArtifactAdapters,
     trackToolActivity,
+    onGoalChanged,
   );
   return server;
 }
@@ -340,11 +347,13 @@ function registerMcpSurface(
   server: McpRegistrationTarget,
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
+  goalStore: GoalStore,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   trackToolActivity?: TrackToolActivity,
+  onGoalChanged?: () => void,
 ): void {
   const registrationTarget = trackToolActivity
     ? withTrackedToolHandlers(server, trackToolActivity)
@@ -405,6 +414,12 @@ function registerMcpSurface(
           .string()
           .optional()
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+        refresh_context: z
+          .boolean()
+          .optional()
+          .describe(
+            "Force a fresh reload of workspace instructions, skills, and nested instruction discovery. Defaults to false; normal continued work should reuse cached workspace context.",
+          ),
       },
       outputSchema: {
         workspace_id: z.string(),
@@ -434,12 +449,18 @@ function registerMcpSurface(
             reason: z.string(),
           }),
         ]),
+        resume: z.object({
+          status: z.enum(["active", "blocked", "done"]),
+          summary: z.string(),
+          next_step: z.string().optional(),
+          updated_at: z.string(),
+        }).optional(),
         instruction: z.string(),
       },
       ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, base_ref }, { _meta }) => {
+    async ({ path, mode, base_ref, refresh_context }, { _meta }) => {
       const startedAt = performance.now();
       const baseRef = base_ref;
       const {
@@ -449,13 +470,22 @@ function registerMcpSurface(
         workspaceReused,
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
-        { path, mode, baseRef },
+        { path, mode, baseRef, refreshContext: refresh_context },
         { conversationScopeId: conversationScopeIdFromRequestMeta(_meta) },
       );
       const review = await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
         root: workspace.root,
       });
+      const taskCheckpoint = workspaces.getTaskCheckpoint(workspace.id);
+      const resume = taskCheckpoint
+        ? {
+            status: taskCheckpoint.status,
+            summary: taskCheckpoint.summary,
+            next_step: taskCheckpoint.nextStep,
+            updated_at: taskCheckpoint.updatedAt,
+          }
+        : undefined;
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -499,11 +529,19 @@ function registerMcpSurface(
       const cardInstruction = config.skillsEnabled
         ? "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
         : "Use this workspace_id for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agents_files instructions. Before working under a path listed in available_agents_files, read that instruction file.";
+      const resumeInstruction = resume
+        ? [
+            `Resume checkpoint (${resume.status}, ${resume.updated_at}): ${resume.summary}`,
+            resume.next_step ? `Next checkpoint step: ${resume.next_step}` : undefined,
+            "Use workspace_turn delta before broadly rereading project files when current filesystem changes may matter.",
+          ].filter(Boolean).join("\n")
+        : undefined;
       const workspaceInstruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Continue with this workspace_id.",
             "Keep following the project instructions, nested instruction files, skills, agent profiles, and diagnostics already provided for this workspace.",
+            resumeInstruction,
           ].join("\n\n")
         : workspace.mode === "worktree"
           ? "Use this workspace_id for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
@@ -541,6 +579,9 @@ function registerMcpSurface(
             visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
+            resume
+              ? `Resume checkpoint [${resume.status}]: ${resume.summary}${resume.next_step ? `\nNext: ${resume.next_step}` : ""}`
+              : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
@@ -571,6 +612,7 @@ function registerMcpSurface(
             agentProviders: cardAgentProviders,
             agents: cardAgents,
             review,
+            taskCheckpoint: resume,
             instruction: cardInstruction,
             summary: {
               mode: workspace.mode,
@@ -598,6 +640,7 @@ function registerMcpSurface(
               }
             : undefined,
           review,
+          resume,
           ...(includeBootstrapContext
             ? {
                 agents_files: loadedAgentsFiles,
@@ -622,6 +665,7 @@ function registerMcpSurface(
         [
           "Read all or part of a file in a workspace.",
           "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+          "A Goal response may also advertise a bounded @context/<goal_id>/*.md recovery path; read that derived context before broadly replaying project history.",
           config.skillsEnabled
             ? "If available skills were returned and a task matches one, read the returned skill path before proceeding."
             : "",
@@ -636,8 +680,8 @@ function registerMcpSurface(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path relative to the workspace root, or a skill path returned by open_workspace."
-              : "File path to read, relative to the workspace root.",
+              ? "File path relative to the workspace root, a skill path returned by open_workspace, or a Goal recovery path returned by goal."
+              : "File path relative to the workspace root, or a Goal recovery path returned by goal.",
           ),
         offset: z
           .number()
@@ -700,6 +744,21 @@ function registerMcpSurface(
     config,
     workspaces,
     processSessions,
+    resolveWorkspaceIdForConversation: async (conversationScopeId) => {
+      const goal = goalStore.getGoalForConversation(conversationScopeId);
+      if (goal && !["succeeded", "failed", "cancelled"].includes(goal.status)) {
+        return goal.workspaceSessionId;
+      }
+      return await workspaces.resolveUniqueConversationWorkspaceId(conversationScopeId);
+    },
+  });
+
+  registerGoalTool({
+    server: registrationTarget,
+    config,
+    goalStore,
+    workspaces,
+    onGoalChanged,
   });
 
   registerAppTool(
@@ -800,6 +859,7 @@ export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
   authMode?: ServerAuthMode;
   requestObserver?: RequestObserver;
+  onGoalChanged?: () => void;
 }
 
 export function createServer(
@@ -831,6 +891,7 @@ export function createServer(
     : undefined;
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const goalStore = new GoalStore(config.stateDir);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const toolActivities = new ToolActivityTracker();
@@ -848,11 +909,13 @@ export function createServer(
       target,
       config,
       workspaces,
+      goalStore,
       reviewCheckpoints,
       processSessions,
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
       toolActivities.track,
+      options.onGoalChanged,
     );
   });
   const logMcpHandlerError = (error: Error) => logEvent(
@@ -1039,6 +1102,7 @@ export function createServer(
         await toolActivities.waitForIdle();
         processSessions.shutdown();
         oauthProvider?.close();
+        goalStore.close();
         workspaceStore.close?.();
       })();
       return closePromise;
