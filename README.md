@@ -15,6 +15,8 @@ DevPilot 是基于 [Waishnav/devspace](https://github.com/Waishnav/devspace) 的
 - Windows 一键启动/关闭入口，启动后会等待真实 READY、打印连接信息并自动打开 Control Center。
 - 高保真图片读取：普通图片尽量保持原分辨率；超大图片自动返回总览 + 2×2 细节切片，适合大型 UI、Minecraft/GTNH、图纸等场景。
 - 少量 Windows/provider 可用性修正。
+- **持久 Goal / 跨对话恢复**：将任务状态和验收证据持久化，配合有界的恢复上下文索引。
+- **稳定性诊断与进程会话管理**：连接诊断、批量命令短等待、闲置 session 自动回收、可选 `detach` 和非交互式 SSH/SCP。
 
 ## 当前 MCP 工具
 
@@ -47,11 +49,33 @@ bash
 
 ## 快速开始
 
+### 0. 交给 AI Agent 辅助安装（推荐新手）
+
+不熟悉 Git、Node.js、MCP 或 Windows 配置？可以把下面这段话**原样复制给能操作本机终端的 Codex、Claude Code 或其他可信编程 Agent**。它会按步骤检查、安装、启动并验收，而不是让你盲跑一段远程脚本。
+
+> **注意：** Agent 必须获得你允许的本机终端权限才能实际安装；ChatGPT 普通对话本身不会自动操作你的电脑。首次创建 ChatGPT MCP/App 连接和任何私密授权仍可能需要你手动确认。
+
+```text
+请帮我在 Windows 10/11 上安装并验证 DevPilot（官方仓库：https://github.com/1210350468/devpilot）。
+先阅读仓库 README.md 和 docs/agent-install-prompt.md，并按其中的安全、检查、构建、启动与验收流程执行。
+目标是让我能够在 ChatGPT 中通过 MCP 操作我授权的本地项目。优先选择不需要私有 Tunnel 凭据的 Cloudflare Quick Tunnel；
+如果我明确已有 OpenAI Secure MCP Tunnel，再协助使用本地私有配置，不要要求我在聊天里粘贴任何密钥。
+执行前检查现有 DevPilot 进程/端口和安装目录，禁止覆盖或杀掉已有实例；
+完成后确认 MCP、Tunnel 和 Control Center 真正 READY，告诉我如何在 ChatGPT 中连接，并用只读工具调用做一次验收。
+不要全局更改代理、SSH/Git 凭据或开放整个磁盘；遇到需要我授权的步骤，明确指出并停在该步骤。
+```
+
+完整的可复制提示词、已有安装升级流程和验收清单：**[docs/agent-install-prompt.md](docs/agent-install-prompt.md)**。
+如果 Agent 只会写说明而不能访问本机，按下文手动安装即可。
+
 ### 1. 克隆并构建
 
 ```powershell
 git clone https://github.com/1210350468/devpilot.git
 cd devpilot
+# 如果要使用 Goal / 新的 session 生命周期等候选功能：
+# 先确认 GitHub 上已发布该候选分支，再执行：
+# git switch candidate/persistent-workspace-channel-v1
 corepack enable
 corepack prepare pnpm@11.25.0 --activate
 pnpm install --frozen-lockfile
@@ -212,16 +236,9 @@ pnpm build
 npm pack --dry-run
 ```
 
-当前 upstream-first 发布候选已经验证：
+发布前必须在**要发布的确切提交**重新执行上述检查。旧版构建曾通过 package dry-run 和 Tunnel 端到端验证；这些结果不能自动证明新的提交通过同一轮验收。
 
-- production dependency audit：**0 known vulnerabilities**
-- tests：**139 total / 133 pass / 0 fail / 6 platform-or-optional skips**
-- typecheck：PASS
-- build：PASS
-- package dry-run：PASS
-- OpenAI Secure Tunnel：READY，`/readyz=200`
-- Cloudflare Quick Tunnel：READY，真实 `trycloudflare.com/mcp` URL 已验证
-- Control Center：HTTP 200
+最近候选分支的记录：**198 tests / 192 pass / 0 fail / 6 platform-or-optional skips**，TypeScript 与 production build 通过。依赖审计应以当前 `pnpm audit --prod` 为准，不继续沿用旧版“0 漏洞”的过时结论。GitHub `main`、候选分支和本机运行实例可能不是同一版本；部署前应检查 `git rev-parse --short HEAD` 与发布说明。
 
 ## 与上游 DevSpace 的关系
 
