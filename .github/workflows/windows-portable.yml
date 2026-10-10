@@ -65,11 +65,13 @@ jobs:
           pnpm build
           if ($LASTEXITCODE -ne 0) { throw "Build failed." }
       - name: Dependency audit (stable release gate)
+        id: security_audit
+        continue-on-error: true
         shell: pwsh
         run: |
           pnpm audit --prod
-          if ($LASTEXITCODE -ne 0 -and $env:GITHUB_REF -eq 'refs/heads/main') {
-            throw "Stable release is blocked by dependency audit failures."
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dependency audit failed. The ZIP can be retained as a CI artifact for review, but it must not be published as a GitHub Release."
           }
       - name: Package Windows ZIP with Node runtime and native dependencies
         shell: pwsh
@@ -86,6 +88,7 @@ jobs:
             releases/*.sha256
           if-no-files-found: error
       - name: Publish GitHub Release
+        if: steps.security_audit.outcome == 'success'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,3 +97,8 @@ jobs:
           $flags = @("--generate-notes")
           if ($env:TAG -match '-') { $flags += "--prerelease" }
           gh release create $env:TAG "releases/DevPilot-windows-x64-$env:TAG.zip" "releases/DevPilot-windows-x64-$env:TAG.zip.sha256" --title "DevPilot $env:TAG" --target $env:GITHUB_SHA @flags
+      - name: Block public release when security findings remain
+        if: steps.security_audit.outcome != 'success'
+        shell: pwsh
+        run: |
+          throw "Security audit has unresolved advisories. The Windows ZIP is uploaded as a CI artifact for examination only; no public Release was created."

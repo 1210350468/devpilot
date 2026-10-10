@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet("stable", "preview")][string]$Channel = "stable",
   [switch]$Apply,
   [switch]$Yes
@@ -126,7 +126,12 @@ try {
   Write-Host "SHA256 验证通过。" -ForegroundColor Green
 
   $extract = Join-Path $tmp "unpacked"
-  Expand-Archive -LiteralPath $archive -DestinationPath $extract
+  New-Item -ItemType Directory -Path $extract -Force | Out-Null
+  Push-Location $extract
+  try {
+    & tar.exe -xf $archive
+    if ($LASTEXITCODE -ne 0) { throw "ZIP 解压失败（tar exit $LASTEXITCODE）。" }
+  } finally { Pop-Location }
   $newApp = Join-Path $extract "DevPilot"
   $newManifest = Join-Path $newApp ".devpilot-portable.json"
   if (-not (Test-Path $newManifest) -or

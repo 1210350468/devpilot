@@ -4,6 +4,8 @@
 
 ## Unreleased — Persistent Workspace Channel v2
 
+- Harden Windows packaging after live CI feedback: use Windows bsdtar ZIP output rather than PowerShell Compress-Archive (deep pnpm paths), place pnpm 11 overrides in the workspace manifest so patched transitive dependencies really resolve, and upload candidate build artifacts for inspection while blocking public releases when the production dependency audit still reports vulnerabilities.
+
 - Add Windows portable distribution support: an independent GitHub Actions workflow builds and tests on Windows, bundles the Node runtime and production native modules into a ZIP, publishes SHA256 alongside a GitHub Release, and keeps prereleases separate from stable releases.
 - Add first-run PowerShell wizard for explicit allowed-root and Tunnel selection, bundled-runtime launch support, and a safe portable updater that checks GitHub Releases, verifies SHA256, refuses updates while the local instance is active, preserves private config and Goal/Worktree state, and retains a rollback backup.
 - Add a Control Center version/update panel with manual stable/preview release checks and links to official downloads; no background self-update or silent restart.

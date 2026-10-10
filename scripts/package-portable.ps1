@@ -37,7 +37,10 @@ $markerJson = @{ version = $Tag.Substring(1); tag = $Tag; repository = "12103504
 # Install native dependencies on the target OS/architecture, not on Linux and not from a developer checkout.
 Push-Location $app
 try {
-  & $pnpm install --prod --frozen-lockfile
+  # A portable ZIP must survive extraction without Windows junction/symlink
+  # privileges. Use a physical hoisted node_modules tree instead of pnpm's
+  # default virtual-store symlink graph.
+  & $pnpm install --prod --frozen-lockfile --config.node-linker=hoisted
   if ($LASTEXITCODE -ne 0) { throw "Portable production dependency installation failed." }
   & (Join-Path $app "runtime\node.exe") --version
   & (Join-Path $app "runtime\node.exe") --input-type=module -e "import('better-sqlite3').then(({default: DB}) => { const db = new DB(':memory:'); db.prepare('select 1').get(); db.close(); console.log('sqlite-native-ok'); })"
@@ -45,7 +48,15 @@ try {
 } finally { Pop-Location }
 
 if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }
-Compress-Archive -Path $app -DestinationPath $archive -CompressionLevel Optimal
+Push-Location $stage
+try {
+  # PowerShell Compress-Archive does not reliably support deep pnpm store paths.
+  # Windows ships bsdtar, which supports ZIP format and long paths.
+  # -L materializes pnpm junction/symlink directories so Explorer extraction
+  # does not require link privileges or restore links as ordinary text files.
+  & tar.exe -a -c -L -f $archive DevPilot
+  if ($LASTEXITCODE -ne 0) { throw "Windows ZIP creation failed (tar exit code $LASTEXITCODE)." }
+} finally { Pop-Location }
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 [System.IO.File]::WriteAllText("$archive.sha256", "$hash  $filename`n", [Text.Encoding]::ASCII)
 Write-Host "Portable archive: $archive"

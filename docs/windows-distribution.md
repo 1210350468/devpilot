@@ -4,7 +4,7 @@
 
 1. 进入 <https://github.com/1210350468/devpilot/releases>，下载带 `DevPilot-windows-x64-vX.Y.Z.zip` 和同名 `.sha256` 文件的发行版本。
 2. 使用 `Get-FileHash .\DevPilot-windows-x64-vX.Y.Z.zip -Algorithm SHA256` 核对压缩包 SHA256。发行工作流会同时生成可独立下载的 SHA256 清单。
-3. 解压 ZIP，里面有 `DevPilot` 目录。建议放在用户有写入权限的单独目录，例如 `D:\Apps\DevPilot`，不要直接解压到系统盘根目录。
+3. 解压 ZIP，里面有 `DevPilot` 目录。建议放在用户有写入权限的短路径，例如 `D:\Apps\DevPilot`，不要直接解压到系统盘根目录。如果 Windows 资源管理器提示路径过长，可在 PowerShell 中运行 `tar -xf DevPilot-windows-x64-vX.Y.Z.zip`。
 4. 双击 `首次配置-DevPilot.cmd`，选择允许访问的具体项目目录，以及 Cloudflare Quick Tunnel（首次推荐）或用户自己的 OpenAI Secure MCP Tunnel。
 5. 首次运行需要用户自行完成 ChatGPT MCP/App 授权。必须确认 Control Center 和实际 Tunnel READY；不能仅凭启动器窗口或端口监听判断成功。
 6. 后续用 `启动-DevPilot.cmd` 启动、`关闭-DevPilot.cmd` 退出。便携包已自带 Windows Node.js runtime 与生产依赖，不需要用户另装 Node/pnpm。
@@ -27,6 +27,7 @@
 2. 在 `candidate/*` 分支只允许输入 `vX.Y.Z-beta.N` 或 `vX.Y.Z-rc.N`，发布 GitHub 预发行；正式 `main` 只允许 `vX.Y.Z`。
 3. 工作流在 Windows Runner 上执行 `pnpm install`、TypeScript、回归测试和构建；源代码用 `pnpm install --prod` 打包原生 Windows 依赖，加入 Node 22 runtime，执行 `better-sqlite3` 冒烟测试，输出可解压的 ZIP 和同名 SHA256。
 4. 工作流先上传 artifacts，再创建 GitHub Release；预发行不会默认替换 GitHub Releases 的稳定版本。
+   如果生产依赖安全审计失败，则仍可生成 Actions artifact 供维护者验证打包，但**禁止创建公开 Release**，且工作流标记失败。修复依赖或经项目安全审查后再重新触发正式发布。
 5. **必须检查** Release 的 GitHub Actions 日志、Windows 原生依赖冒烟测试、实际 ZIP 内容，以及独立 Windows 测试机上首次配置、启动、更新和回滚流程，才能标记为稳定版。
 
 早期上游 `.github/workflows/release.yml` 是 npm 发布流程，**不是** DevPilot Windows ZIP 的发布入口。不要用它发布本项目的便携安装包。
