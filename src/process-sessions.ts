@@ -81,6 +81,7 @@ interface ProcessSession {
   idleTimeoutMs?: number;
   maxRuntimeMs?: number;
   detached: boolean;
+  activeClientCalls: number;
 }
 
 interface ProcessSessionManagerOptions {
@@ -303,37 +304,45 @@ export class ProcessSessionManager {
 
   async write(input: WriteStdinInput): Promise<ProcessSnapshot> {
     const session = this.getOwnedSession(input.workspaceId, input.sessionId);
-    this.renewIdleLease(session);
-    const chars = input.chars ?? "";
-    const interactionRequested =
-      chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
+    // A long poll is active use, not inactivity. The idle lease applies only
+    // between client calls, even when a poll exceeds the configured lease.
+    session.activeClientCalls++;
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.idleTimer = undefined;
+    try {
+      const chars = input.chars ?? "";
+      const interactionRequested =
+        chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
 
-    if (input.columns !== undefined || input.rows !== undefined) {
-      session.columns = terminalSize(input.columns, session.columns);
-      session.rows = terminalSize(input.rows, session.rows);
-      if (!session.process?.resize) {
-        throw new Error(`Process session ${session.id} is not a PTY and cannot be resized.`);
+      if (input.columns !== undefined || input.rows !== undefined) {
+        session.columns = terminalSize(input.columns, session.columns);
+        session.rows = terminalSize(input.rows, session.rows);
+        if (!session.process?.resize) {
+          throw new Error(`Process session ${session.id} is not a PTY and cannot be resized.`);
+        }
+        session.process.resize(session.columns, session.rows);
       }
-      session.process.resize(session.columns, session.rows);
-    }
 
-    const interruptRequested = chars.includes("\u0003") && session.running;
-    if (interruptRequested) {
-      session.process?.kill("SIGINT");
-    }
-    const writableChars = chars.replaceAll("\u0003", "");
-    if (writableChars && session.running) session.process?.write(writableChars);
+      const interruptRequested = chars.includes("\u0003") && session.running;
+      if (interruptRequested) {
+        session.process?.kill("SIGINT");
+      }
+      const writableChars = chars.replaceAll("\u0003", "");
+      if (writableChars && session.running) session.process?.write(writableChars);
 
-    if ((interactionRequested || !session.buffer.hasOutput()) && session.running) {
-      const fallback = interactionRequested ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS;
-      const yieldTimeMs = boundedInteger(input.yieldTimeMs, fallback, MAX_PROCESS_YIELD_MS);
-      await this.waitForExit(session, yieldTimeMs);
-    }
+      if ((interactionRequested || !session.buffer.hasOutput()) && session.running) {
+        const fallback = interactionRequested ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS;
+        const yieldTimeMs = boundedInteger(input.yieldTimeMs, fallback, MAX_PROCESS_YIELD_MS);
+        await this.waitForExit(session, yieldTimeMs);
+      }
 
-    const snapshot = this.consume(session, input.maxOutputTokens);
-    if (!session.running) this.removeSession(session.id);
-    else this.renewIdleLease(session);
-    return snapshot;
+      const snapshot = this.consume(session, input.maxOutputTokens);
+      if (!session.running) this.removeSession(session.id);
+      return snapshot;
+    } finally {
+      session.activeClientCalls--;
+      if (session.activeClientCalls === 0) this.renewIdleLease(session);
+    }
   }
 
   terminate(workspaceId: string, sessionId: number): void {
@@ -386,6 +395,7 @@ export class ProcessSessionManager {
         : boundedOptionalTimeout(input.idleTimeoutMs, this.idleSessionTimeoutMs),
       maxRuntimeMs: boundedOptionalTimeout(input.maxRuntimeMs),
       detached: false,
+      activeClientCalls: 0,
     };
   }
 
@@ -520,6 +530,7 @@ export class ProcessSessionManager {
 
   private renewIdleLease(session: ProcessSession): void {
     if (!session.running || !session.autoClose || session.idleTimeoutMs === undefined) return;
+    if (session.activeClientCalls > 0) return;
     if (session.idleTimer) clearTimeout(session.idleTimer);
     session.idleTimer = setTimeout(() => {
       session.idleTimer = undefined;
