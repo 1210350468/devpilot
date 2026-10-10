@@ -49,6 +49,21 @@ bash
 
 ## 快速开始
 
+### Windows 便携安装包（无需自行安装 Node.js）
+
+在 [GitHub Releases](https://github.com/1210350468/devpilot/releases) 下载与你信任的版本对应的
+`DevPilot-windows-x64-vX.Y.Z.zip`，解压后双击 **`首次配置-DevPilot.cmd`**。
+安装向导会帮助你选择授权工作目录与 Cloudflare/OpenAI Tunnel 模式，随后完成健康检查。
+ZIP 内含 Node.js 和 Windows 原生依赖，**无需另外安装 pnpm**。请下载并保留同名 `.sha256` 校验文件以验证压缩包完整性。
+
+目前源码仓库提供的是构建与 Release 自动化功能，**只有 GitHub Releases 页面实际出现 ZIP 时才能下载便携版**。
+当前版本还没有发行 ZIP 的话，请使用下文源码安装。
+
+便携版以后需要更新时，先正常关闭 DevPilot，再运行 `更新-DevPilot.cmd`，它会检查新版本、
+下载 ZIP、验证 SHA256、迁移私有配置与 Goal/Worktree 状态，并保留完整旧版目录供回滚。
+Control Center 的“版本与更新”面板也提供按需检查，不会自动替你停止活跃 MCP 任务。
+具体流程见 [Windows 发布与更新说明](docs/windows-distribution.md)。
+
 ### 0. 交给 AI Agent 辅助安装（推荐新手）
 
 不熟悉 Git、Node.js、MCP 或 Windows 配置？可以把下面这段话**原样复制给能操作本机终端的 Codex、Claude Code 或其他可信编程 Agent**。它会按步骤检查、安装、启动并验收，而不是让你盲跑一段远程脚本。
@@ -200,6 +215,7 @@ http://127.0.0.1:47680/devpilot/
 - **总览**：MCP / Tunnel / Tool Surface / Provider / 运行事件。
 - **请求观察器**：按 ChatGPT 对话查看 discovery、tool call、工具名、状态与耗时。
 - **设置**：allowed roots、`codex/claude` tool surface、Artifacts、Skills、Subagents、请求/工具日志、Public Base URL。
+- **版本与更新**：手动检查 GitHub Releases 的稳定版或预览版，展示当前版本与新版发行链接；不会自动覆盖运行中的实例。
 - 顶部运行控制：启动、重启、停止。
 
 保存设置并重启时，Supervisor 会重新读取配置文件，不会只复用旧内存参数。

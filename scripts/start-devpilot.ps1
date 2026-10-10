@@ -2,6 +2,7 @@
   [ValidateSet("cloudflare-quick", "openai-secure")]
   [string]$TunnelProvider,
   [string]$OpenAiTunnelConfig,
+  [string]$AllowedRoot,
   [int]$McpPort = 47681,
   [int]$ControlPort = 47680,
   [int]$TunnelHealthPort = 47683,
@@ -10,6 +11,8 @@
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$PortableManifest = Join-Path $ProjectRoot ".devpilot-portable.json"
+$BundledNode = Join-Path $ProjectRoot "runtime\node.exe"
 $ConfigDir = Join-Path $ProjectRoot ".devpilot-config"
 $RuntimeDir = Join-Path $ProjectRoot ".devpilot-runtime"
 $ToolsDir = Join-Path $ProjectRoot "tools"
@@ -301,14 +304,17 @@ if ($existing -and $existing.supervisor.status -eq "online") {
   if (-not (Wait-PortFree $ControlPort 8000)) { throw "旧 DevPilot Supervisor 没有释放端口 $ControlPort。" }
 }
 
-$node = Get-Command node.exe -ErrorAction SilentlyContinue
+$isPortable = Test-Path $PortableManifest
+if ($isPortable -and -not (Test-Path $BundledNode)) { throw "便携包缺少 runtime\node.exe，请重新下载官方完整压缩包。" }
+$node = if ($isPortable) { [pscustomobject]@{ Source = $BundledNode } } else { Get-Command node.exe -ErrorAction SilentlyContinue }
 if (-not $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
 if (-not $node) { throw "未找到 Node.js。需要 Node.js >=22.19 且 <27。" }
 $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
 if (-not $pnpm) { $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue }
-if (-not $pnpm) { throw "未找到 pnpm。请先安装 pnpm 11.25.0。" }
+if (-not $pnpm -and -not $isPortable) { throw "未找到 pnpm。请先安装 pnpm 11.25.0。" }
 
 if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
+  if ($isPortable) { throw "便携包缺少 node_modules，请重新下载并解压完整压缩包。" }
   Write-Host "[准备] 首次运行，安装依赖..." -ForegroundColor Cyan
   Push-Location $ProjectRoot
   try { & $pnpm.Source install --frozen-lockfile } finally { Pop-Location }
@@ -317,6 +323,7 @@ if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
 
 $distCli = Join-Path $ProjectRoot "dist\devpilot-cli.js"
 if (-not (Test-Path $distCli)) {
+  if ($isPortable) { throw "便携包缺少构建产物 dist，请重新下载完整压缩包。" }
   Write-Host "[准备] 构建 DevPilot..." -ForegroundColor Cyan
   Push-Location $ProjectRoot
   try { & $pnpm.Source build } finally { Pop-Location }
@@ -324,7 +331,9 @@ if (-not (Test-Path $distCli)) {
 }
 
 if (-not (Test-Path $ConfigPath) -and -not (Test-Path $LegacyConfigPath)) {
-  $defaultRoot = (Split-Path $ProjectRoot -Parent).Replace('\','\\')
+  $selectedRoot = if ($AllowedRoot) { [System.IO.Path]::GetFullPath($AllowedRoot) } else { $ProjectRoot }
+  if (-not (Test-Path -LiteralPath $selectedRoot -PathType Container)) { throw "允许的工作目录不存在：$selectedRoot" }
+  $defaultRoot = $selectedRoot.Replace('\','\\')
   $stateDir = (Join-Path $RuntimeDir "state").Replace('\','\\')
   $worktreeRoot = (Join-Path $RuntimeDir "worktrees").Replace('\','\\')
   $config = @"

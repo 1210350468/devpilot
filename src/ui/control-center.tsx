@@ -97,6 +97,19 @@ interface SettingsResponse {
   };
 }
 
+interface UpdateCheckResponse {
+  ok: boolean;
+  current: { version: string; portable: boolean };
+  channel: "stable" | "preview";
+  available: boolean;
+  latest?: {
+    tag: string;
+    version: string;
+    releaseUrl: string;
+    zip: { name: string; url: string };
+  };
+}
+
 interface ObservedRequest {
   id: string;
   startedAt: string;
@@ -135,6 +148,10 @@ function App() {
   const [error, setError] = useState<string>();
   const [busyAction, setBusyAction] = useState<ServiceAction>();
   const [updatedAt, setUpdatedAt] = useState<Date>();
+  const [updateChannel, setUpdateChannel] = useState<"stable" | "preview">("stable");
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResponse>();
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateError, setUpdateError] = useState<string>();
 
   const refresh = async () => {
     try {
@@ -165,6 +182,21 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    // One bounded release check on opening Control Center; manual checks remain available.
+    void fetchJson<UpdateCheckResponse>("/devpilot/api/updates?channel=stable")
+      .then(async (result) => {
+        if (result.current.version.includes("-")) {
+          const preview = await fetchJson<UpdateCheckResponse>("/devpilot/api/updates?channel=preview");
+          setUpdateChannel("preview");
+          setUpdateCheck(preview);
+        } else {
+          setUpdateCheck(result);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
   const act = async (action: ServiceAction) => {
     setBusyAction(action);
     try {
@@ -178,6 +210,19 @@ function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusyAction(undefined);
+    }
+  };
+
+  const checkUpdates = async () => {
+    setUpdateChecking(true);
+    setUpdateError(undefined);
+    try {
+      const next = await fetchJson<UpdateCheckResponse>(`/devpilot/api/updates?channel=${updateChannel}`);
+      setUpdateCheck(next);
+    } catch (reason) {
+      setUpdateError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setUpdateChecking(false);
     }
   };
 
@@ -262,6 +307,36 @@ function App() {
                   <InfoRow label="Tunnel 最近变化" value={tunnelDiagnostics?.lastTransitionAt ? formatTimestampAge(tunnelDiagnostics.lastTransitionAt, updatedAt) : "本次运行未观察到变化"} />
                 </div>
                 <p className="diagnostic-help">ChatGPT 正在转圈时，如果“最近 MCP 到达”没有更新，请优先检查 OpenAI Connector、Secure Tunnel 与代理链路；如果请求已经到达且“最老运行任务”持续增长，耗时发生在本地工具执行。</p>
+              </Panel>
+            </section>
+
+            <section className="diagnostic-grid">
+              <Panel title="版本与更新" subtitle="GitHub Releases · 只检查公开版本，不会擅自重启或修改当前实例">
+                <div className="update-strip">
+                  <div>
+                    <strong>DevPilot 版本</strong>
+                    <p>{updateCheck ? `${updateCheck.current.version} · ${updateCheck.current.portable ? "便携安装" : "源码安装"}` : "点击检查获取本地版本及 GitHub 发行信息"}</p>
+                  </div>
+                  <div className="update-actions">
+                    <select aria-label="更新频道" value={updateChannel} onChange={(event) => { setUpdateChannel(event.target.value as "stable" | "preview"); setUpdateCheck(undefined); }}>
+                      <option value="stable">稳定版</option>
+                      <option value="preview">包括预览版</option>
+                    </select>
+                    <button className="runtime-button" disabled={updateChecking} onClick={() => void checkUpdates()}>{updateChecking ? "检查中…" : "检查更新"}</button>
+                  </div>
+                </div>
+                {updateError && <p className="update-note">检查失败：{updateError}</p>}
+                {updateCheck && (
+                  <div className="update-result">
+                    {updateCheck.latest
+                      ? <span>{updateCheck.available ? "发现新版本" : "当前没有更高版本"} · {updateCheck.latest.tag}</span>
+                      : <span>此频道尚未发布带 Windows ZIP 和 SHA256 的正式 Release。</span>}
+                    {updateCheck.available && updateCheck.latest && (
+                      <a href={updateCheck.latest.releaseUrl} target="_blank" rel="noopener noreferrer">查看发行说明与下载包 ↗</a>
+                    )}
+                  </div>
+                )}
+                <p className="diagnostic-help">Windows 便携版可在退出 DevPilot 后双击「更新-DevPilot.cmd」，自动下载、校验 SHA256 并保留回滚备份。源码版请使用 Git 安全升级，勿直接用 ZIP 覆盖。</p>
               </Panel>
             </section>
 

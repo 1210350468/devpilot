@@ -59,6 +59,13 @@ code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", m
 .diagnostic-verdict.error { border-color: #4e3037; background: #1d1316; }
 .diagnostic-lines { margin-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }
 .diagnostic-help { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid #1d222c; color: #727d90; font-size: 10px; line-height: 1.65; }
+.update-strip { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+.update-strip strong, .update-result { font-size: 12px; }
+.update-strip p, .update-note { font-size: 11px; color: #8590a5; margin: 5px 0 0; }
+.update-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.update-actions select { border: 1px solid #303746; border-radius: 8px; background: #151b25; color: #c8d0df; padding: 6px 9px; font-size: 11px; }
+.update-result { margin-top: 12px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: #b6c2d8; }
+.update-result a { color: #8db3ee; text-decoration: underline; }
 .system-grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr); gap: 12px; }
 .lower-grid { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
 .panel { min-width: 0; padding: 18px; border: 1px solid #222732; border-radius: 12px; background: rgba(17,20,27,.88); }

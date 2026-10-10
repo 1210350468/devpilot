@@ -19,6 +19,7 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 import { RequestObserver } from "./request-observer.js";
 import { acquireTunnelLease, type TunnelLease } from "./tunnel-lease.js";
 import { TunnelHealthHistory, type TunnelHealthSnapshot } from "./connection-diagnostics.js";
+import { checkForUpdates } from "./devpilot-updates.js";
 import { loadDevspaceFiles, setDevspaceConfigValues } from "./user-config.js";
 
 const OPENAI_TUNNEL_ID = /^tunnel_[0-9a-f]{32}$/;
@@ -424,6 +425,14 @@ export class DevPilotSupervisor {
       res.type("html").send(readFileSync(htmlPath, "utf8"));
     });
     this.app.get("/devpilot/api/status", localOnly, async (_req, res) => res.json(await this.status()));
+    this.app.get("/devpilot/api/updates", localOnly, async (req, res) => {
+      const channel = req.query.channel === "preview" ? "preview" : "stable";
+      try {
+        res.json({ ok: true, ...(await checkForUpdates(channel)) });
+      } catch (error) {
+        res.status(502).json({ ok: false, error: errorMessage(error) });
+      }
+    });
     this.app.get("/devpilot/api/requests", localOnly, (req, res) => {
       const limit = queryPositiveInteger(req, "limit", 100, 200);
       const conversationScopeId = queryString(req, "conversationScopeId");

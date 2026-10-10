@@ -223,7 +223,8 @@ const abandoned = await lifecycleManager.start({
 });
 assert.equal(abandoned.running, true);
 assert.ok(abandoned.sessionId);
-await new Promise((resolve) => setTimeout(resolve, 250));
+// Windows taskkill/reap may take longer under concurrent CI load than the idle lease itself.
+await new Promise((resolve) => setTimeout(resolve, 1_200));
 const autoClosed = await lifecycleManager.write({
   workspaceId: "workspace-lifecycle",
   sessionId: abandoned.sessionId,
@@ -286,7 +287,7 @@ const hardLimited = await lifecycleManager.start({
   maxRuntimeMs: 80,
 });
 assert.ok(hardLimited.sessionId);
-await new Promise((resolve) => setTimeout(resolve, 250));
+await new Promise((resolve) => setTimeout(resolve, 1_200));
 const hardStopped = await lifecycleManager.write({
   workspaceId: "workspace-lifecycle",
   sessionId: hardLimited.sessionId,
