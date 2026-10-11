@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,40 @@ for (const entrypoint of [
 
 testLinkedCheckoutReadsCurrentConfig();
 testMissingSourceRuntimeFailsClosed();
+testDevPilotStopLauncherUsesCurrentSupervisorPid();
+testDevPilotStartLauncherPreservesLegacyConfig();
+
+function testDevPilotStopLauncherUsesCurrentSupervisorPid(): void {
+  const script = readFileSync(join(projectRoot, "scripts", "stop-devpilot.ps1"), "utf8");
+  assert.match(script, /runtime\.supervisorPid/);
+  assert.match(script, /runtime\.pid/);
+  assert.match(script, /Stop-Process\s+-Id\s+\$supervisorPid/);
+}
+
+function testDevPilotStartLauncherPreservesLegacyConfig(): void {
+  const path = join(projectRoot, "scripts", "start-devpilot.ps1");
+  const bytes = readFileSync(path);
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  const script = bytes.toString("utf8");
+  assert.match(script, /\$LegacyConfigPath\s*=\s*Join-Path \$ConfigDir "config\.json"/);
+  assert.match(
+    script,
+    /if \(-not \(Test-Path \$ConfigPath\) -and -not \(Test-Path \$LegacyConfigPath\)\)/,
+  );
+  assert.match(script, /DEVPILOT_LEGACY_LOCAL_STATE/);
+  assert.match(script, /DEVPILOT_LEGACY_LOCAL_WORKTREES/);
+  assert.match(script, /loadDevspaceFiles\(\)/);
+  assert.match(script, /setDevspaceConfigValues\(edits\)/);
+  assert.match(script, /\$previousRuntime\s*=\s*Get-JsonFile \$RuntimePath/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("McpPort"\)/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("ControlPort"\)/);
+  assert.match(script, /\$PSBoundParameters\.ContainsKey\("TunnelHealthPort"\)/);
+  assert.match(script, /\[string\]\$OpenAiTunnelConfig/);
+  assert.match(script, /忽略 ambient DEVPILOT_OPENAI_TUNNEL_CONFIG/);
+  assert.match(script, /\$env:DEVPILOT_OPENAI_TUNNEL_CONFIG\s*=\s*\$null/);
+  assert.match(script, /\$status\.tunnel\.state -eq "error"/);
+  assert.match(script, /workspace_turn \/ goal/);
+}
 
 function testLinkedCheckoutReadsCurrentConfig(): void {
   const root = mkdtempSync(join(tmpdir(), "devspace-bin-config-test-"));

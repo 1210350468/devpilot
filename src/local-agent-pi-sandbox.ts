@@ -3,10 +3,10 @@ import { existsSync, realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import {
-  SandboxManager,
-  type FilesystemConfig,
-  type SandboxRuntimeConfig,
+import { fileURLToPath } from "node:url";
+import type {
+  FilesystemConfig,
+  SandboxRuntimeConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import {
   createBashTool,
@@ -73,6 +73,33 @@ let sandboxSessionCount = 0;
 let sandboxCommandCount = 0;
 const sandboxCommandWaiters = new Set<() => void>();
 const sessionStates = new WeakMap<object, PiSandboxSessionState>();
+const portableInstallMarker = fileURLToPath(new URL("../.devpilot-portable.json", import.meta.url));
+
+// Keep the native Pi sandbox outside the default portable runtime until its
+// transitive node-forge signature-verification advisory is patched upstream.
+// In restricted modes, missing sandbox support MUST fail closed; never run
+// commands unsandboxed as a fallback.
+type SandboxRuntimeManager = typeof import("@anthropic-ai/sandbox-runtime")["SandboxManager"];
+let sandboxManagerPromise: Promise<SandboxRuntimeManager> | undefined;
+
+async function requirePiSandboxManager(): Promise<SandboxRuntimeManager> {
+  if (existsSync(portableInstallMarker)) {
+    throw new Error(
+      "Pi restricted mode is disabled in the Windows portable edition while its sandbox dependency has an unresolved security advisory. " +
+      "The session was blocked instead of running without a sandbox.",
+    );
+  }
+  sandboxManagerPromise ??= import("@anthropic-ai/sandbox-runtime")
+    .then((module) => module.SandboxManager)
+    .catch(() => {
+      sandboxManagerPromise = undefined;
+      throw new Error(
+        "Pi restricted mode requires @anthropic-ai/sandbox-runtime, which is not bundled in the Windows portable edition. " +
+        "The session was blocked instead of running without a sandbox.",
+      );
+    });
+  return sandboxManagerPromise;
+}
 
 export function createPiSandboxModeRef(value: PiSandboxWriteMode): PiSandboxModeRef {
   return { value };
@@ -183,7 +210,7 @@ export async function releasePiSandboxSession(session: object): Promise<void> {
   if (sandboxSessionCount !== 0) return;
   const reset = async (): Promise<void> => {
     try {
-      await SandboxManager.reset();
+      await (await requirePiSandboxManager()).reset();
     } finally {
       sandboxInitialization = undefined;
       windowsSandboxWorkspace = undefined;
@@ -328,11 +355,12 @@ async function acquirePiSandbox(state: PiSandboxSessionState): Promise<void> {
 }
 
 async function ensureSandboxInitialized(): Promise<void> {
-  if (!SandboxManager.isSupportedPlatform()) {
+  const manager = await requirePiSandboxManager();
+  if (!manager.isSupportedPlatform()) {
     throw new Error(`Pi allowed mode requires a sandbox, but ${process.platform} is not supported by sandbox-runtime.`);
   }
   if (!sandboxInitialization) {
-    sandboxInitialization = SandboxManager.initialize(createPiSandboxConfig()).catch((error) => {
+    sandboxInitialization = manager.initialize(createPiSandboxConfig()).catch((error) => {
       sandboxInitialization = undefined;
       throw new Error(`Pi allowed mode could not initialize its sandbox: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -341,6 +369,7 @@ async function ensureSandboxInitialized(): Promise<void> {
 }
 
 async function ensureWindowsSandbox(workspace: string): Promise<void> {
+  const manager = await requirePiSandboxManager();
   const resolvedWorkspace = resolveWorkspace(workspace);
   if (windowsSandboxWorkspace === resolvedWorkspace && sandboxInitialization) {
     await sandboxInitialization;
@@ -348,13 +377,13 @@ async function ensureWindowsSandbox(workspace: string): Promise<void> {
   }
   if (sandboxInitialization) {
     try {
-      await SandboxManager.reset();
+      await manager.reset();
     } finally {
       sandboxInitialization = undefined;
       windowsSandboxWorkspace = undefined;
     }
   }
-  sandboxInitialization = SandboxManager.initialize(createPiSandboxConfig(resolvedWorkspace)).catch((error) => {
+  sandboxInitialization = manager.initialize(createPiSandboxConfig(resolvedWorkspace)).catch((error) => {
     sandboxInitialization = undefined;
     windowsSandboxWorkspace = undefined;
     throw new Error(`Pi allowed mode could not initialize its Windows sandbox: ${error instanceof Error ? error.message : String(error)}`);
@@ -374,12 +403,13 @@ async function runSandboxedCommand(
   cwd: string,
   options: Parameters<BashOperations["exec"]>[2],
 ): Promise<{ exitCode: number | null }> {
+  const manager = await requirePiSandboxManager();
   if (options.signal?.aborted) throw new Error("aborted");
   const workspace = resolveWorkspace(cwd);
   const customConfig: Partial<SandboxRuntimeConfig> = {
     filesystem: createPiSandboxFilesystem(workspace),
   };
-  const wrapped = await SandboxManager.wrapWithSandboxArgv(
+  const wrapped = await manager.wrapWithSandboxArgv(
     command,
     undefined,
     process.platform === "win32" ? undefined : customConfig,
@@ -389,7 +419,7 @@ async function runSandboxedCommand(
   try {
     return await spawnSandboxedCommand(wrapped.argv, wrapped.env, workspace, options);
   } finally {
-    SandboxManager.cleanupAfterCommand();
+    manager.cleanupAfterCommand();
   }
 }
 

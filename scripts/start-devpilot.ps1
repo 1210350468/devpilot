@@ -1,6 +1,8 @@
 ﻿param(
   [ValidateSet("cloudflare-quick", "openai-secure")]
   [string]$TunnelProvider,
+  [string]$OpenAiTunnelConfig,
+  [string]$AllowedRoot,
   [int]$McpPort = 47681,
   [int]$ControlPort = 47680,
   [int]$TunnelHealthPort = 47683,
@@ -9,12 +11,20 @@
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$PortableManifest = Join-Path $ProjectRoot ".devpilot-portable.json"
+$BundledNode = Join-Path $ProjectRoot "runtime\node.exe"
 $ConfigDir = Join-Path $ProjectRoot ".devpilot-config"
 $RuntimeDir = Join-Path $ProjectRoot ".devpilot-runtime"
 $ToolsDir = Join-Path $ProjectRoot "tools"
 $ConfigPath = Join-Path $ConfigDir "config.jsonc"
+$LegacyConfigPath = Join-Path $ConfigDir "config.json"
 $AuthPath = Join-Path $ConfigDir "auth.json"
-$TunnelConfigPath = if ($env:DEVPILOT_OPENAI_TUNNEL_CONFIG) { $env:DEVPILOT_OPENAI_TUNNEL_CONFIG } else { Join-Path $ConfigDir "openai-tunnel.json" }
+$DefaultTunnelConfigPath = Join-Path $ConfigDir "openai-tunnel.json"
+$AmbientTunnelConfigPath = if ($env:DEVPILOT_OPENAI_TUNNEL_CONFIG) { [string]$env:DEVPILOT_OPENAI_TUNNEL_CONFIG } else { $null }
+$TunnelConfigPath = if ($OpenAiTunnelConfig) { [System.IO.Path]::GetFullPath($OpenAiTunnelConfig) } else { $DefaultTunnelConfigPath }
+if ($AmbientTunnelConfigPath -and -not $OpenAiTunnelConfig) {
+  Write-Host "[安全] 忽略 ambient DEVPILOT_OPENAI_TUNNEL_CONFIG=$AmbientTunnelConfigPath；默认只使用当前 DevPilot 的本地 Tunnel 配置。需要外部配置时请显式传 -OpenAiTunnelConfig。" -ForegroundColor Yellow
+}
 $RuntimePath = Join-Path $RuntimeDir "runtime.json"
 $InfoPath = Join-Path $ProjectRoot "DevPilot-connection.txt"
 $StdoutPath = Join-Path $RuntimeDir "devpilot.out.log"
@@ -35,6 +45,36 @@ function Get-JsonFile([string]$Path) {
   if (-not (Test-Path $Path)) { return $null }
   try { return Get-Content -Raw -Encoding UTF8 $Path | ConvertFrom-Json } catch { return $null }
 }
+
+function Get-ValidPort($Value) {
+  if ($null -eq $Value) { return $null }
+  try {
+    $port = [int]$Value
+    if ($port -ge 1 -and $port -le 65535) { return $port }
+  } catch {}
+  return $null
+}
+
+$previousRuntime = Get-JsonFile $RuntimePath
+if ($previousRuntime) {
+  if (-not $PSBoundParameters.ContainsKey("McpPort")) {
+    $previousMcpPort = Get-ValidPort $previousRuntime.mcpPort
+    if ($previousMcpPort) { $McpPort = $previousMcpPort }
+  }
+  if (-not $PSBoundParameters.ContainsKey("ControlPort")) {
+    $previousControlPort = Get-ValidPort $previousRuntime.controlPort
+    if ($previousControlPort) { $ControlPort = $previousControlPort }
+  }
+  if (-not $PSBoundParameters.ContainsKey("TunnelHealthPort")) {
+    $previousTunnelHealthPort = Get-ValidPort $previousRuntime.tunnelHealthPort
+    if ($previousTunnelHealthPort) { $TunnelHealthPort = $previousTunnelHealthPort }
+  }
+}
+
+$ControlUrl = "http://127.0.0.1:$ControlPort"
+$PanelUrl = "$ControlUrl/devpilot/"
+$TunnelHealthUrl = "http://127.0.0.1:$TunnelHealthPort"
+$LocalMcpUrl = "http://127.0.0.1:$McpPort/mcp"
 
 function New-OwnerToken {
   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -95,7 +135,7 @@ function Select-TunnelProvider {
     Write-Host ""
     Write-Host $options[$selected].Help -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "当前 Codex 工具面：open_workspace / read / show_changes / apply_patch / exec_command / write_stdin" -ForegroundColor DarkGray
+    Write-Host "当前 Codex 工具面：open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn / goal" -ForegroundColor DarkGray
 
     $key = [Console]::ReadKey($true).Key
     switch ($key) {
@@ -217,7 +257,7 @@ Write-Host "============================================================" -Foreg
 Write-Host ("模式          : " + $(if ($TunnelProvider -eq "cloudflare-quick") { "Cloudflare Quick Tunnel" } else { "OpenAI Secure MCP Tunnel" }))
 Write-Host "Control Center: $PanelUrl"
 Write-Host "本地 MCP      : $LocalMcpUrl"
-Write-Host "工具面        : codex (6 tools)"
+Write-Host "工具面        : codex (7 tools)"
 Write-Host ""
 
 $existing = Test-ControlApi
@@ -264,14 +304,17 @@ if ($existing -and $existing.supervisor.status -eq "online") {
   if (-not (Wait-PortFree $ControlPort 8000)) { throw "旧 DevPilot Supervisor 没有释放端口 $ControlPort。" }
 }
 
-$node = Get-Command node.exe -ErrorAction SilentlyContinue
+$isPortable = Test-Path $PortableManifest
+if ($isPortable -and -not (Test-Path $BundledNode)) { throw "便携包缺少 runtime\node.exe，请重新下载官方完整压缩包。" }
+$node = if ($isPortable) { [pscustomobject]@{ Source = $BundledNode } } else { Get-Command node.exe -ErrorAction SilentlyContinue }
 if (-not $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
 if (-not $node) { throw "未找到 Node.js。需要 Node.js >=22.19 且 <27。" }
 $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
 if (-not $pnpm) { $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue }
-if (-not $pnpm) { throw "未找到 pnpm。请先安装 pnpm 11.25.0。" }
+if (-not $pnpm -and -not $isPortable) { throw "未找到 pnpm。请先安装 pnpm 11.25.0。" }
 
 if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
+  if ($isPortable) { throw "便携包缺少 node_modules，请重新下载并解压完整压缩包。" }
   Write-Host "[准备] 首次运行，安装依赖..." -ForegroundColor Cyan
   Push-Location $ProjectRoot
   try { & $pnpm.Source install --frozen-lockfile } finally { Pop-Location }
@@ -280,14 +323,17 @@ if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
 
 $distCli = Join-Path $ProjectRoot "dist\devpilot-cli.js"
 if (-not (Test-Path $distCli)) {
+  if ($isPortable) { throw "便携包缺少构建产物 dist，请重新下载完整压缩包。" }
   Write-Host "[准备] 构建 DevPilot..." -ForegroundColor Cyan
   Push-Location $ProjectRoot
   try { & $pnpm.Source build } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "pnpm build 失败。" }
 }
 
-if (-not (Test-Path $ConfigPath)) {
-  $defaultRoot = (Split-Path $ProjectRoot -Parent).Replace('\','\\')
+if (-not (Test-Path $ConfigPath) -and -not (Test-Path $LegacyConfigPath)) {
+  $selectedRoot = if ($AllowedRoot) { [System.IO.Path]::GetFullPath($AllowedRoot) } else { $ProjectRoot }
+  if (-not (Test-Path -LiteralPath $selectedRoot -PathType Container)) { throw "允许的工作目录不存在：$selectedRoot" }
+  $defaultRoot = $selectedRoot.Replace('\','\\')
   $stateDir = (Join-Path $RuntimeDir "state").Replace('\','\\')
   $worktreeRoot = (Join-Path $RuntimeDir "worktrees").Replace('\','\\')
   $config = @"
@@ -307,6 +353,33 @@ if (-not (Test-Path $ConfigPath)) {
 "@
   Write-Utf8NoBom $ConfigPath ($config.Trim() + [Environment]::NewLine)
   Write-Host "[配置] 首次配置已创建。默认 allowed root: $(Split-Path $ProjectRoot -Parent)" -ForegroundColor Cyan
+} elseif (-not (Test-Path $ConfigPath) -and (Test-Path $LegacyConfigPath)) {
+  Write-Host "[配置] 检测到 legacy config.json，正在执行原子迁移并保留备份..." -ForegroundColor Cyan
+  $legacyConfig = Get-JsonFile $LegacyConfigPath
+  if (-not $legacyConfig) { throw "无法解析 legacy 配置：$LegacyConfigPath" }
+  $legacyProperties = @($legacyConfig.PSObject.Properties.Name)
+  $env:DEVSPACE_CONFIG_DIR = $ConfigDir
+  $env:DEVPILOT_LEGACY_LOCAL_STATE = if ($legacyProperties -contains "stateDir") { "0" } else { "1" }
+  $env:DEVPILOT_LEGACY_LOCAL_WORKTREES = if ($legacyProperties -contains "worktreeRoot") { "0" } else { "1" }
+  $env:DEVPILOT_LEGACY_STATE_DIR = Join-Path $RuntimeDir "state"
+  $env:DEVPILOT_LEGACY_WORKTREE_ROOT = Join-Path $RuntimeDir "worktrees"
+  $migrationScript = @'
+import { loadDevspaceFiles, setDevspaceConfigValues } from "./dist/user-config.js";
+loadDevspaceFiles();
+const edits = [];
+if (process.env.DEVPILOT_LEGACY_LOCAL_STATE === "1") {
+  edits.push({ path: ["storage", "stateDir"], value: process.env.DEVPILOT_LEGACY_STATE_DIR });
+}
+if (process.env.DEVPILOT_LEGACY_LOCAL_WORKTREES === "1") {
+  edits.push({ path: ["workspaces", "worktreeRoot"], value: process.env.DEVPILOT_LEGACY_WORKTREE_ROOT });
+}
+if (edits.length > 0) setDevspaceConfigValues(edits);
+'@
+  Push-Location $ProjectRoot
+  try { $migrationScript | & $node.Source --input-type=module } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "legacy config.json 迁移失败。" }
+  Remove-Item Env:DEVPILOT_LEGACY_LOCAL_STATE, Env:DEVPILOT_LEGACY_LOCAL_WORKTREES, Env:DEVPILOT_LEGACY_STATE_DIR, Env:DEVPILOT_LEGACY_WORKTREE_ROOT -ErrorAction SilentlyContinue
+  Write-Host "[配置] legacy 配置迁移完成；缺省状态目录已固定到当前 DevPilot runtime。" -ForegroundColor Cyan
 }
 if (-not (Test-Path $AuthPath)) {
   Write-Utf8NoBom $AuthPath ((@{ ownerToken = (New-OwnerToken) } | ConvertTo-Json) + [Environment]::NewLine)
@@ -323,6 +396,7 @@ $env:DEVPILOT_OPENAI_TUNNEL_ID = $null
 $env:DEVPILOT_OPENAI_TUNNEL_API_KEY = $null
 $env:DEVPILOT_OPENAI_TUNNEL_HEALTH_ADDR = $null
 $env:DEVPILOT_OPENAI_CONTROL_PLANE_PROXY = $null
+$env:DEVPILOT_OPENAI_TUNNEL_CONFIG = $null
 
 $tunnelId = $null
 $controlPlaneProxy = $null
@@ -384,6 +458,7 @@ while ((Get-Date) -lt $deadline) {
   }
   $status = Test-ControlApi
   if (-not $status) { continue }
+  if ($status.tunnel.state -eq "error") { break }
   if ($status.server.status -eq "online" -and $status.tunnel.provider -eq $TunnelProvider -and $status.tunnel.ready -eq $true) { break }
 }
 
@@ -391,6 +466,8 @@ $ready = $status -and $status.server.status -eq "online" -and $status.tunnel.pro
 if (-not $ready) {
   try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
   $detail = if (Test-Path $StderrPath) { Get-Content -Raw -Encoding UTF8 $StderrPath } else { "" }
+  $tunnelError = if ($status -and $status.tunnel -and $status.tunnel.error) { [string]$status.tunnel.error } else { "" }
+  if ($tunnelError) { throw "DevPilot Tunnel 启动失败：$tunnelError`n$detail" }
   throw "DevPilot 没有在 55 秒内进入 READY。请查看 $StderrPath`n$detail"
 }
 
@@ -460,7 +537,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "Control Center : $PanelUrl"
 Write-Host "Local MCP      : $LocalMcpUrl"
 Write-Host "Tool surface   : codex"
-Write-Host "Tools          : open_workspace / read / show_changes / apply_patch / exec_command / write_stdin"
+Write-Host "Tools          : open_workspace / read / show_changes / apply_patch / exec_command / write_stdin / workspace_turn / goal"
 if ($TunnelProvider -eq "cloudflare-quick") {
   Write-Host "Mode           : Cloudflare Quick Tunnel"
   Write-Host "Public MCP     : $($status.tunnel.publicMcpUrl)" -ForegroundColor Cyan

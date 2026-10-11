@@ -35,6 +35,40 @@ interface StatusResponse {
   };
   providers: Array<{ name: string; available: boolean; note?: string; reason?: string }>;
   requestObserver: { enabled: boolean; retained: number };
+  diagnostics?: {
+    requests: {
+      generatedAt: string;
+      windowMs: number;
+      slowThresholdMs: number;
+      verySlowThresholdMs: number;
+      state: "quiet" | "healthy" | "busy" | "slow" | "error";
+      receivedCount: number;
+      completedCount: number;
+      runningCount: number;
+      failedCount: number;
+      slowCount: number;
+      verySlowCount: number;
+      p95DurationMs?: number;
+      maxDurationMs?: number;
+      latestRequestAt?: string;
+      latestCompletedAt?: string;
+      oldestRunning?: {
+        id: string;
+        startedAt: string;
+        toolName?: string;
+        mcpMethod?: string;
+        elapsedMs: number;
+      };
+    };
+    tunnel: {
+      checkedAt?: string;
+      ready?: boolean;
+      readySince?: string;
+      lastTransitionAt?: string;
+      transitionCount: number;
+      recentTransitions: Array<{ at: string; ready: boolean }>;
+    };
+  };
   events: Array<{ at: string; level: "info" | "warn" | "error"; message: string }>;
 }
 
@@ -60,6 +94,19 @@ interface SettingsResponse {
     port: number;
     allowedRoots: string[];
     toolMode: "codex" | "claude";
+  };
+}
+
+interface UpdateCheckResponse {
+  ok: boolean;
+  current: { version: string; portable: boolean };
+  channel: "stable" | "preview";
+  available: boolean;
+  latest?: {
+    tag: string;
+    version: string;
+    releaseUrl: string;
+    zip: { name: string; url: string };
   };
 }
 
@@ -101,6 +148,10 @@ function App() {
   const [error, setError] = useState<string>();
   const [busyAction, setBusyAction] = useState<ServiceAction>();
   const [updatedAt, setUpdatedAt] = useState<Date>();
+  const [updateChannel, setUpdateChannel] = useState<"stable" | "preview">("stable");
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResponse>();
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateError, setUpdateError] = useState<string>();
 
   const refresh = async () => {
     try {
@@ -131,6 +182,21 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    // One bounded release check on opening Control Center; manual checks remain available.
+    void fetchJson<UpdateCheckResponse>("/devpilot/api/updates?channel=stable")
+      .then(async (result) => {
+        if (result.current.version.includes("-")) {
+          const preview = await fetchJson<UpdateCheckResponse>("/devpilot/api/updates?channel=preview");
+          setUpdateChannel("preview");
+          setUpdateCheck(preview);
+        } else {
+          setUpdateCheck(result);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
   const act = async (action: ServiceAction) => {
     setBusyAction(action);
     try {
@@ -144,6 +210,19 @@ function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusyAction(undefined);
+    }
+  };
+
+  const checkUpdates = async () => {
+    setUpdateChecking(true);
+    setUpdateError(undefined);
+    try {
+      const next = await fetchJson<UpdateCheckResponse>(`/devpilot/api/updates?channel=${updateChannel}`);
+      setUpdateCheck(next);
+    } catch (reason) {
+      setUpdateError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setUpdateChecking(false);
     }
   };
 
@@ -161,6 +240,8 @@ function App() {
   );
   const availableProviders = status?.providers.filter((provider) => provider.available).length ?? 0;
   const ready = status?.server.status === "online" && (status?.tunnel.provider === "none" || status?.tunnel.ready === true);
+  const requestDiagnostics = status?.diagnostics?.requests;
+  const tunnelDiagnostics = status?.diagnostics?.tunnel;
 
   return (
     <div className="dp-shell">
@@ -204,6 +285,59 @@ function App() {
               <Metric label="Tunnel" value={status?.tunnel.ready ? "READY" : status?.tunnel.state ?? "—"} detail={status?.tunnel.tunnelId ?? status?.tunnel.publicMcpUrl ?? status?.tunnel.provider ?? "未配置"} />
               <Metric label="已识别对话" value={conversations.length} detail="按 openai/session 分组" />
               <Metric label="工具调用" value={toolCalls.length} detail={`保留请求 ${status?.requestObserver.retained ?? 0}`} />
+              <Metric label="本地请求状态" value={requestStateLabel(requestDiagnostics?.state)} detail={`最近 5 分钟 ${requestDiagnostics?.receivedCount ?? 0} 个 MCP 请求`} />
+              <Metric label="慢调用" value={requestDiagnostics?.slowCount ?? 0} detail={`≥ ${formatDuration(requestDiagnostics?.slowThresholdMs)}`} />
+              <Metric label="本地 P95" value={formatDuration(requestDiagnostics?.p95DurationMs)} detail={`最大 ${formatDuration(requestDiagnostics?.maxDurationMs)}`} />
+              <Metric label="Tunnel 连续 READY" value={status?.tunnel.ready ? formatSince(tunnelDiagnostics?.readySince, updatedAt) : "—"} detail={`状态变化 ${tunnelDiagnostics?.transitionCount ?? 0} 次`} />
+            </section>
+
+            <section className="diagnostic-grid">
+              <Panel title="连接诊断" subtitle="区分 OpenAI / Secure Tunnel / 本地 MCP / 工具执行耗时">
+                <div className={`diagnostic-verdict ${requestDiagnostics?.state ?? "quiet"}`}>
+                  <strong>{diagnosticVerdict(requestDiagnostics, status?.tunnel.ready)}</strong>
+                  <span>{diagnosticExplanation(requestDiagnostics, status?.tunnel.ready)}</span>
+                </div>
+                <div className="diagnostic-lines">
+                  <InfoRow label="最近 MCP 到达" value={formatTimestampAge(requestDiagnostics?.latestRequestAt, updatedAt)} />
+                  <InfoRow label="正在执行" value={String(requestDiagnostics?.runningCount ?? 0)} />
+                  <InfoRow label="失败请求" value={String(requestDiagnostics?.failedCount ?? 0)} />
+                  <InfoRow label="极慢调用" value={`${requestDiagnostics?.verySlowCount ?? 0} · ≥ ${formatDuration(requestDiagnostics?.verySlowThresholdMs)}`} />
+                  <InfoRow label="最老运行任务" value={requestDiagnostics?.oldestRunning ? `${requestDiagnostics.oldestRunning.toolName ?? requestDiagnostics.oldestRunning.mcpMethod ?? "MCP"} · ${formatDuration(requestDiagnostics.oldestRunning.elapsedMs)}` : "无"} />
+                  <InfoRow label="Tunnel 最近检测" value={formatTimestampAge(tunnelDiagnostics?.checkedAt, updatedAt)} />
+                  <InfoRow label="Tunnel 最近变化" value={tunnelDiagnostics?.lastTransitionAt ? formatTimestampAge(tunnelDiagnostics.lastTransitionAt, updatedAt) : "本次运行未观察到变化"} />
+                </div>
+                <p className="diagnostic-help">ChatGPT 正在转圈时，如果“最近 MCP 到达”没有更新，请优先检查 OpenAI Connector、Secure Tunnel 与代理链路；如果请求已经到达且“最老运行任务”持续增长，耗时发生在本地工具执行。</p>
+              </Panel>
+            </section>
+
+            <section className="diagnostic-grid">
+              <Panel title="版本与更新" subtitle="GitHub Releases · 只检查公开版本，不会擅自重启或修改当前实例">
+                <div className="update-strip">
+                  <div>
+                    <strong>DevPilot 版本</strong>
+                    <p>{updateCheck ? `${updateCheck.current.version} · ${updateCheck.current.portable ? "便携安装" : "源码安装"}` : "点击检查获取本地版本及 GitHub 发行信息"}</p>
+                  </div>
+                  <div className="update-actions">
+                    <select aria-label="更新频道" value={updateChannel} onChange={(event) => { setUpdateChannel(event.target.value as "stable" | "preview"); setUpdateCheck(undefined); }}>
+                      <option value="stable">稳定版</option>
+                      <option value="preview">包括预览版</option>
+                    </select>
+                    <button className="runtime-button" disabled={updateChecking} onClick={() => void checkUpdates()}>{updateChecking ? "检查中…" : "检查更新"}</button>
+                  </div>
+                </div>
+                {updateError && <p className="update-note">检查失败：{updateError}</p>}
+                {updateCheck && (
+                  <div className="update-result">
+                    {updateCheck.latest
+                      ? <span>{updateCheck.available ? "发现新版本" : "当前没有更高版本"} · {updateCheck.latest.tag}</span>
+                      : <span>此频道尚未发布带 Windows ZIP 和 SHA256 的正式 Release。</span>}
+                    {updateCheck.available && updateCheck.latest && (
+                      <a href={updateCheck.latest.releaseUrl} target="_blank" rel="noopener noreferrer">查看发行说明与下载包 ↗</a>
+                    )}
+                  </div>
+                )}
+                <p className="diagnostic-help">Windows 便携版可在退出 DevPilot 后双击「更新-DevPilot.cmd」，自动下载、校验 SHA256 并保留回滚备份。源码版请使用 Git 安全升级，勿直接用 ZIP 覆盖。</p>
+              </Panel>
             </section>
 
             <section className="system-grid">
@@ -311,8 +445,8 @@ function ConversationList({ conversations, selectedId, unidentifiedCount, onSele
 function RequestTable({ requests, onSelect, selectedId }: { requests: ObservedRequest[]; onSelect: (request: ObservedRequest) => void; selectedId?: string }) {
   if (!requests.length) return <div className="empty-state padded">还没有观察到 MCP 请求。</div>;
   return <div className="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>工具</th><th>状态</th><th>耗时</th></tr></thead><tbody>{requests.map((request) => (
-    <tr key={request.id} className={selectedId === request.id ? "selected-row" : ""} onClick={() => onSelect(request)}>
-      <td>{new Date(request.startedAt).toLocaleTimeString()}</td><td>{request.mcpMethod ?? request.method}</td><td><code>{request.toolName ?? "—"}</code></td><td>{request.status ?? "运行中"}</td><td>{request.durationMs !== undefined ? `${request.durationMs} ms` : "—"}</td>
+    <tr key={request.id} className={`${selectedId === request.id ? "selected-row " : ""}${requestClass(request)}`} onClick={() => onSelect(request)}>
+      <td>{new Date(request.startedAt).toLocaleTimeString()}</td><td>{request.mcpMethod ?? request.method}</td><td><code>{request.toolName ?? "—"}</code></td><td>{request.status ?? "运行中"}</td><td>{request.durationMs !== undefined ? formatDuration(request.durationMs) : formatDuration(Math.max(0, Date.now() - Date.parse(request.startedAt)))}</td>
     </tr>
   ))}</tbody></table></div>;
 }
@@ -410,7 +544,7 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
     <Panel title="DevSpace 设置" subtitle="这里现在直接映射上游 v1 配置，不再保留旧 minimal/full/widgets 假选项。">
       <label className="form-row"><span>监听地址</span><input value={host} onChange={(event) => setHost(event.target.value)} /></label>
       <label className="form-row"><span>MCP 端口</span><input value={port} inputMode="numeric" onChange={(event) => setPort(event.target.value)} /></label>
-      <label className="form-row"><span>工具 Surface</span><select value={toolMode} onChange={(event) => setToolMode(event.target.value as "codex" | "claude")}><option value="codex">Codex：apply_patch + exec_command + write_stdin</option><option value="claude">Claude：write + edit + bash</option></select></label>
+      <label className="form-row"><span>工具 Surface</span><select value={toolMode} onChange={(event) => setToolMode(event.target.value as "codex" | "claude")}><option value="codex">Codex：apply_patch + exec_command + write_stdin + workspace_turn</option><option value="claude">Claude：write + edit + bash</option></select></label>
       <label className="form-row vertical"><span>允许目录</span><textarea rows={5} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
       <label className="form-row vertical"><span>Public Base URL</span><input value={publicBaseUrl} onChange={(event) => setPublicBaseUrl(event.target.value)} /></label>
       <Toggle label="MCP App UI" checked={uiEnabled} onChange={setUiEnabled} />
@@ -440,6 +574,59 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 function shortId(id: string): string {
   if (id.length <= 24) return id;
   return `${id.slice(0, 12)}…${id.slice(-8)}`;
+}
+
+type RequestDiagnostics = NonNullable<StatusResponse["diagnostics"]>["requests"];
+
+function requestStateLabel(state: RequestDiagnostics["state"] | undefined): string {
+  if (state === "healthy") return "正常";
+  if (state === "busy") return "执行中";
+  if (state === "slow") return "本地较慢";
+  if (state === "error") return "有失败";
+  return "安静";
+}
+
+function diagnosticVerdict(requests: RequestDiagnostics | undefined, tunnelReady: boolean | undefined): string {
+  if (tunnelReady === false) return "Secure Tunnel 当前未 READY";
+  if (requests?.state === "error") return "最近请求已经到达本机，但存在本地失败";
+  if (requests?.state === "slow") return "最近请求已经到达本机，本地执行存在明显慢调用";
+  if (requests?.state === "busy") return "请求已经到达本机，工具仍在执行";
+  if (requests?.state === "healthy") return "最近 MCP 请求在本地正常完成";
+  return "本地最近没有收到 MCP 请求";
+}
+
+function diagnosticExplanation(requests: RequestDiagnostics | undefined, tunnelReady: boolean | undefined): string {
+  if (tunnelReady === false) return "优先检查 Secure Tunnel、OpenAI 控制面和本地代理连接。";
+  if (!requests || requests.state === "quiet") return "如果此时 ChatGPT 正在等待，延迟发生在请求抵达本地 MCP 之前。";
+  if (requests.state === "slow" || requests.state === "busy") return "本地 Request Observer 已经看到请求，可继续根据工具名和运行时间定位耗时。";
+  if (requests.state === "error") return "请求已经进入 DevPilot，请查看请求观察器中的 HTTP 状态和工具详情。";
+  return "本地链路当前没有明显异常。";
+}
+
+function requestClass(request: ObservedRequest): string {
+  if (request.status !== undefined && request.status >= 400) return "request-error";
+  const elapsed = request.durationMs ?? Math.max(0, Date.now() - Date.parse(request.startedAt));
+  if (elapsed >= 15_000) return "request-very-slow";
+  if (elapsed >= 5_000) return "request-slow";
+  return "";
+}
+
+function formatDuration(value: number | undefined): string {
+  if (value === undefined) return "—";
+  if (value < 1_000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)} s`;
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1_000)}s`;
+}
+
+function formatTimestampAge(value: string | undefined, now: Date | undefined): string {
+  if (!value) return "未观察到";
+  const age = Math.max(0, (now?.getTime() ?? Date.now()) - Date.parse(value));
+  return `${new Date(value).toLocaleTimeString()} · ${formatDuration(age)} 前`;
+}
+
+function formatSince(value: string | undefined, now: Date | undefined): string {
+  if (!value) return "—";
+  return formatDuration(Math.max(0, (now?.getTime() ?? Date.now()) - Date.parse(value)));
 }
 
 async function fetchJson<T>(url: string): Promise<T> {

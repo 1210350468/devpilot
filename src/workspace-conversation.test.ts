@@ -27,6 +27,26 @@ test("a conversation reuses its checkout context", async (t) => {
   assert.deepEqual(second.workspace.agentProfiles, first.workspace.agentProfiles);
 });
 
+test("a reused checkout keeps cached bootstrap context until explicitly refreshed", async (t) => {
+  const { project, registry } = await fixture(t);
+  const agentsPath = join(project, "AGENTS.md");
+
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-cache" });
+  assert.match(first.agentsFiles.map((file) => file.content).join("\n"), /project instructions/);
+
+  await writeFile(agentsPath, "updated project instructions\n");
+  const cached = await registry.openWorkspace(project, { conversationScopeId: "chat-cache" });
+  assert.match(cached.agentsFiles.map((file) => file.content).join("\n"), /project instructions/);
+  assert.doesNotMatch(cached.agentsFiles.map((file) => file.content).join("\n"), /updated project instructions/);
+
+  const refreshed = await registry.openWorkspace(
+    { path: project, refreshContext: true },
+    { conversationScopeId: "chat-cache" },
+  );
+  assert.match(refreshed.agentsFiles.map((file) => file.content).join("\n"), /updated project instructions/);
+  assert.equal(refreshed.workspace.id, first.workspace.id);
+});
+
 test("different conversations receive separate checkout workspaces", async (t) => {
   const { project, registry } = await fixture(t);
 
@@ -58,6 +78,26 @@ test("conversation bindings distinguish canonical projects", async (t) => {
   assert.equal(repeatedProjectOpen.workspace.id, firstProjectOpen.workspace.id);
   assert.equal(repeatedOtherProjectOpen.workspace.id, otherProjectOpen.workspace.id);
   assert.notEqual(otherProjectOpen.workspace.id, firstProjectOpen.workspace.id);
+});
+
+test("conversation workspace auto-resolution succeeds only when unambiguous", async (t) => {
+  const { root, project, registry } = await fixture(t);
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-auto" });
+  assert.equal(
+    await registry.resolveUniqueConversationWorkspaceId("chat-auto"),
+    first.workspace.id,
+  );
+  assert.equal(await registry.resolveUniqueConversationWorkspaceId("chat-missing"), undefined);
+
+  const otherProject = join(root, "other-project");
+  await mkdir(otherProject);
+  await writeFile(join(otherProject, "AGENTS.md"), "other project instructions\n");
+  const second = await registry.openWorkspace(otherProject, { conversationScopeId: "chat-auto" });
+  assert.notEqual(second.workspace.id, first.workspace.id);
+  await assert.rejects(
+    registry.resolveUniqueConversationWorkspaceId("chat-auto"),
+    /multiple active workspaces.*provide workspace_id explicitly/i,
+  );
 });
 
 test("concurrent checkout opens reuse one workspace and return matching context", async (t) => {
@@ -152,6 +192,29 @@ test("checkout reuse survives a registry restart", async (t) => {
   assert.equal(restored.workspace.id, first.workspace.id);
 });
 
+test("task checkpoint state survives a registry restart with the conversation workspace", async (t) => {
+  const context = await fixture(t);
+  const first = await context.registry.openWorkspace(context.project, {
+    conversationScopeId: "chat-task-restart",
+  });
+  const saved = context.registry.setTaskCheckpoint(first.workspace.id, {
+    status: "active",
+    summary: "Finished the persistence slice.",
+    nextStep: "Resume with the delta slice.",
+    snapshotRef: "c".repeat(40),
+  });
+  context.closeStore(context.store);
+
+  const restoredStore = context.openStore();
+  const restoredRegistry = new WorkspaceRegistry(context.config, restoredStore);
+  const restored = await restoredRegistry.openWorkspace(context.project, {
+    conversationScopeId: "chat-task-restart",
+  });
+
+  assert.equal(restored.workspace.id, first.workspace.id);
+  assert.deepEqual(restoredRegistry.getTaskCheckpoint(restored.workspace.id), saved);
+});
+
 test("a failed first context load does not consume bootstrap", async (t) => {
   const { project, registry } = await fixture(t);
   const agentsDir = join(project, ".devspace", "agents");
@@ -160,7 +223,10 @@ test("a failed first context load does not consume bootstrap", async (t) => {
   await breakAgentsDirectory(agentsDir, backupDir);
   try {
     await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
+      () => registry.openWorkspace(
+        { path: project, refreshContext: true },
+        { conversationScopeId: "chat-1" },
+      ),
       /directory|ENOTDIR/i,
     );
   } finally {
@@ -179,7 +245,10 @@ test("a context-loading failure preserves a valid checkout binding", async (t) =
   await breakAgentsDirectory(agentsDir, backupDir);
   try {
     await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
+      () => registry.openWorkspace(
+        { path: project, refreshContext: true },
+        { conversationScopeId: "chat-1" },
+      ),
       /directory|ENOTDIR/i,
     );
   } finally {
