@@ -56,6 +56,8 @@ bash
 安装向导会帮助你选择授权工作目录与 Cloudflare/OpenAI Tunnel 模式，随后完成健康检查。
 ZIP 内含 Node.js 和 Windows 原生依赖，**无需另外安装 pnpm**。请下载并保留同名 `.sha256` 校验文件以验证压缩包完整性。
 
+安全说明：便携 ZIP 暂不内置 Pi Agent 的原生受限沙箱依赖（上游尚有未修复的 `node-forge` 漏洞）；Pi 受限执行会拒绝启动而不会降级为无沙箱模式。Codex/Claude/MCP 主功能不受影响。详见 [Windows 发布与更新说明](docs/windows-distribution.md)。
+
 目前源码仓库提供的是构建与 Release 自动化功能，**只有 GitHub Releases 页面实际出现 ZIP 时才能下载便携版**。
 当前版本还没有发行 ZIP 的话，请使用下文源码安装。
 

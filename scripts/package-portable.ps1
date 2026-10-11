@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory=$true)][string]$Tag,
   [string]$OutputDirectory = "releases"
 )
@@ -42,9 +42,17 @@ try {
   # default virtual-store symlink graph.
   & $pnpm install --prod --frozen-lockfile --config.node-linker=hoisted
   if ($LASTEXITCODE -ne 0) { throw "Portable production dependency installation failed." }
+  if (Test-Path (Join-Path $app "node_modules\@anthropic-ai\sandbox-runtime")) {
+    throw "Security gate: unpatched Pi sandbox runtime must not be bundled in the Windows portable release."
+  }
   & (Join-Path $app "runtime\node.exe") --version
   & (Join-Path $app "runtime\node.exe") --input-type=module -e "import('better-sqlite3').then(({default: DB}) => { const db = new DB(':memory:'); db.prepare('select 1').get(); db.close(); console.log('sqlite-native-ok'); })"
   if ($LASTEXITCODE -ne 0) { throw "Windows native SQLite smoke test failed." }
+  # The ordinary runtime must still import without the optional Pi sandbox.
+  & (Join-Path $app "runtime\node.exe") --input-type=module -e "await import('./dist/local-agent-pi-sandbox.js'); console.log('portable-runtime-import-ok')"
+  if ($LASTEXITCODE -ne 0) { throw "Portable runtime cannot load without the excluded sandbox dependency." }
+  & (Join-Path $app "runtime\node.exe") --input-type=module -e "const m=await import('./dist/local-agent-pi-sandbox.js');try{await m.registerPiSandboxSession({},process.cwd(),m.createPiSandboxModeRef('allowed'),'allowed');process.exitCode=10}catch(error){if(!String(error.message).includes('blocked instead of running without a sandbox')){console.error(error);process.exitCode=11}else{console.log('portable-pi-fail-closed-ok')}}"
+  if ($LASTEXITCODE -ne 0) { throw "Portable Pi restricted mode must refuse to run without a safe sandbox." }
 } finally { Pop-Location }
 
 if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }

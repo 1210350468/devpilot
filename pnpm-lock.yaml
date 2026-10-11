@@ -24,9 +24,6 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.200
         version: 0.3.200(@anthropic-ai/sdk@0.110.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.1(zod@4.4.3))(zod@4.4.3)
-      '@anthropic-ai/sandbox-runtime':
-        specifier: 0.0.71
-        version: 0.0.71
       '@clack/prompts':
         specifier: ^1.5.1
         version: 1.5.1
@@ -91,6 +88,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@anthropic-ai/sandbox-runtime':
+        specifier: 0.0.71
+        version: 0.0.71
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13

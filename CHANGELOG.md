@@ -4,6 +4,8 @@
 
 ## Unreleased — Persistent Workspace Channel v2
 
+- Keep Pi's native sandbox runtime out of the default Windows portable production dependency tree while an unpatched node-forge signature verification vulnerability remains. Lazy-load sandbox support and fail closed for restricted Pi sessions if it is unavailable, without disabling the standard DevPilot, Codex, Claude, or MCP workflows.
+
 - Harden Windows packaging after live CI feedback: use Windows bsdtar ZIP output rather than PowerShell Compress-Archive (deep pnpm paths), place pnpm 11 overrides in the workspace manifest so patched transitive dependencies really resolve, and upload candidate build artifacts for inspection while blocking public releases when the production dependency audit still reports vulnerabilities.
 
 - Add Windows portable distribution support: an independent GitHub Actions workflow builds and tests on Windows, bundles the Node runtime and production native modules into a ZIP, publishes SHA256 alongside a GitHub Release, and keeps prereleases separate from stable releases.

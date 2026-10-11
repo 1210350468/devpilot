@@ -9,6 +9,8 @@
 5. 首次运行需要用户自行完成 ChatGPT MCP/App 授权。必须确认 Control Center 和实际 Tunnel READY；不能仅凭启动器窗口或端口监听判断成功。
 6. 后续用 `启动-DevPilot.cmd` 启动、`关闭-DevPilot.cmd` 退出。便携包已自带 Windows Node.js runtime 与生产依赖，不需要用户另装 Node/pnpm。
 
+**受限功能说明：** 便携发行版暂不捆绑 Pi Agent 的 `@anthropic-ai/sandbox-runtime`，因为其 `node-forge` 间接依赖仍存在公开且未修复的签名验证漏洞。使用 Pi 的受限写入模式时会**明确拒绝执行**，不会自动降级成无限制运行。Codex/Claude 和 DevPilot 的普通 MCP、Goal、Control Center、工作区等核心功能不依赖该沙箱运行时。需要 Pi 沙箱的开发者应使用源码开发环境，并自行评估对应上游安全风险。
+
 ## 更新与回滚
 
 - Control Center 的“版本与更新”使用 GitHub Releases 公开 API，只在用户点击时检查，不会自动安装。
@@ -26,6 +28,7 @@
 1. 在 GitHub **Actions → Windows portable release → Run workflow** 选择经过 review/CI 的正确分支。
 2. 在 `candidate/*` 分支只允许输入 `vX.Y.Z-beta.N` 或 `vX.Y.Z-rc.N`，发布 GitHub 预发行；正式 `main` 只允许 `vX.Y.Z`。
 3. 工作流在 Windows Runner 上执行 `pnpm install`、TypeScript、回归测试和构建；源代码用 `pnpm install --prod` 打包原生 Windows 依赖，加入 Node 22 runtime，执行 `better-sqlite3` 冒烟测试，输出可解压的 ZIP 和同名 SHA256。
+   Pi 原生受限沙箱属于开发依赖，不进入可分发的生产依赖树。打包阶段会断言该包不存在，并验证普通运行模块在缺少该沙箱时仍可导入。
 4. 工作流先上传 artifacts，再创建 GitHub Release；预发行不会默认替换 GitHub Releases 的稳定版本。
    如果生产依赖安全审计失败，则仍可生成 Actions artifact 供维护者验证打包，但**禁止创建公开 Release**，且工作流标记失败。修复依赖或经项目安全审查后再重新触发正式发布。
 5. **必须检查** Release 的 GitHub Actions 日志、Windows 原生依赖冒烟测试、实际 ZIP 内容，以及独立 Windows 测试机上首次配置、启动、更新和回滚流程，才能标记为稳定版。
