@@ -52,6 +52,10 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 6, name: "local-agent-effort-rename" },
       { version: 7, name: "workspace-recovery-state" },
       { version: 8, name: "local-agent-turns" },
+      { version: 9, name: "workspace-task-checkpoints" },
+      { version: 10, name: "persistent-goals" },
+      { version: 11, name: "goal-browser-bindings" },
+      { version: 12, name: "goal-progress-guards" },
     ]);
   } finally {
     database.close();

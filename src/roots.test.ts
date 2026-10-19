@@ -31,3 +31,8 @@ if (process.platform === "win32") {
     /Path is outside allowed roots/,
   );
 }
+
+// Full Access must be explicitly resolved from configuration, not inferred
+// from an empty root list or from permission flags on an unrelated workspace.
+assert.equal(assertAllowedPath(join(home, "Desktop"), ["*"]), resolve(home, "Desktop"));
+assert.throws(() => assertAllowedPath(join(home, "Desktop"), [join(home, "restricted")]), /outside allowed roots/);

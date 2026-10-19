@@ -47,6 +47,26 @@ const migrations: Migration[] = [
     name: "local-agent-turns",
     up: migrateLocalAgentTurns,
   },
+  {
+    version: 9,
+    name: "workspace-task-checkpoints",
+    up: migrateWorkspaceTaskCheckpoints,
+  },
+  {
+    version: 10,
+    name: "persistent-goals",
+    up: migratePersistentGoals,
+  },
+  {
+    version: 11,
+    name: "goal-browser-bindings",
+    up: migrateGoalBrowserBindings,
+  },
+  {
+    version: 12,
+    name: "goal-progress-guards",
+    up: migrateGoalProgressGuards,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -289,9 +309,134 @@ function migrateLocalAgentTurns(sqlite: Database.Database): void {
   `);
 }
 
+function migrateWorkspaceTaskCheckpoints(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists workspace_task_checkpoints (
+      workspace_session_id text primary key,
+      status text not null default 'active',
+      summary text not null,
+      next_step text,
+      snapshot_ref text,
+      created_at text not null,
+      updated_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists workspace_task_checkpoints_updated_idx
+      on workspace_task_checkpoints(updated_at desc);
+  `);
+}
+
+function migratePersistentGoals(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists goals (
+      id text primary key,
+      workspace_session_id text not null,
+      objective text not null,
+      status text not null default 'planning',
+      constraints_json text not null default '[]',
+      resume_capsule_json text not null default '{}',
+      summary text not null default '',
+      current_step text,
+      next_step text,
+      round_number integer not null default 0,
+      max_rounds integer not null default 80,
+      max_wall_time_minutes integer not null default 720,
+      max_no_progress_rounds integer not null default 4,
+      max_same_failure integer not null default 3,
+      lease_owner text,
+      lease_until text,
+      pending_resume text not null default 'false',
+      last_resume_nonce text,
+      created_at text not null,
+      updated_at text not null,
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists goals_workspace_idx
+      on goals(workspace_session_id, updated_at desc);
+    create index if not exists goals_status_idx
+      on goals(status, updated_at desc);
+
+    create table if not exists goal_criteria (
+      goal_id text not null,
+      criterion_id text not null,
+      description text not null,
+      required text not null default 'true',
+      status text not null default 'pending',
+      evidence_json text not null default '[]',
+      verification_source text,
+      verification_time text,
+      updated_at text not null,
+      primary key (goal_id, criterion_id),
+      foreign key (goal_id)
+        references goals(id)
+        on delete cascade
+    );
+
+    create index if not exists goal_criteria_status_idx
+      on goal_criteria(goal_id, status);
+
+    create table if not exists goal_conversation_bindings (
+      conversation_scope_id text primary key,
+      goal_id text not null,
+      created_at text not null,
+      last_used_at text not null,
+      foreign key (goal_id)
+        references goals(id)
+        on delete cascade
+    );
+
+    create index if not exists goal_conversation_bindings_goal_idx
+      on goal_conversation_bindings(goal_id, last_used_at desc);
+
+    create table if not exists goal_events (
+      id integer primary key autoincrement,
+      goal_id text not null,
+      kind text not null,
+      round_number integer not null default 0,
+      payload_json text not null default '{}',
+      created_at text not null,
+      foreign key (goal_id)
+        references goals(id)
+        on delete cascade
+    );
+
+    create index if not exists goal_events_goal_idx
+      on goal_events(goal_id, id desc);
+  `);
+}
+
+function migrateGoalBrowserBindings(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists goal_browser_bindings (
+      goal_id text primary key,
+      adapter text not null,
+      conversation_url text,
+      conversation_key text,
+      rotation_count integer not null default 0,
+      updated_at text not null,
+      foreign key (goal_id)
+        references goals(id)
+        on delete cascade
+    );
+  `);
+}
+
+function migrateGoalProgressGuards(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "goals", "no_progress_rounds", "integer not null default 0");
+  addColumnIfMissing(sqlite, "goals", "same_failure_count", "integer not null default 0");
+  addColumnIfMissing(sqlite, "goals", "last_progress_signature", "text");
+  addColumnIfMissing(sqlite, "goals", "last_failure_signature", "text");
+}
+
 function addColumnIfMissing(
   sqlite: Database.Database,
-  table: "workspace_sessions" | "local_agent_sessions",
+  table: "workspace_sessions" | "local_agent_sessions" | "goals",
   column: string,
   definition: string,
 ): void {

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 releases/
+.release/
 .devspace-dev/
 .env
 *.log

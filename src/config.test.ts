@@ -17,6 +17,7 @@ try {
   assert.equal(defaults.port, 7676);
   assert.equal(defaults.publicBaseUrl, "http://127.0.0.1:7676");
   assert.deepEqual(defaults.allowedRoots, [process.cwd()]);
+  assert.equal(defaults.permissionMode, "restricted");
   assert.deepEqual(defaults.allowedHosts, ["localhost", "127.0.0.1", "::1"]);
   assert.equal(defaults.toolMode, "codex");
   assert.equal(defaults.uiEnabled, true);
@@ -85,6 +86,7 @@ try {
   assert.equal(configured.port, 8787);
   assert.equal(configured.publicBaseUrl, "https://devspace.example.com");
   assert.deepEqual(configured.allowedRoots, [resolve(homedir(), "work")]);
+  assert.equal(configured.permissionMode, "restricted");
   assert.deepEqual(configured.allowedHosts, [
     "localhost",
     "127.0.0.1",

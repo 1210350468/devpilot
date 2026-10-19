@@ -41,6 +41,43 @@ test("workspace store lists only stale managed worktrees", async (t) => {
   assert.deepEqual(unwrap(store.listStaleManagedWorktrees(new Date(0))), []);
 });
 
+test("workspace store lists all bindings for one conversation", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-workspace-store-test-"));
+  const store = new SqliteWorkspaceStore(stateDir);
+  t.after(async () => {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  for (const id of ["ws_a", "ws_b"]) {
+    store.createSession({ id, root: `/tmp/${id}`, mode: "checkout" });
+  }
+  store.setConversationBinding({
+    conversationScopeId: "chat-a",
+    targetKey: "project-a",
+    workspaceSessionId: "ws_a",
+  });
+  store.setConversationBinding({
+    conversationScopeId: "chat-a",
+    targetKey: "project-b",
+    workspaceSessionId: "ws_b",
+  });
+  store.setConversationBinding({
+    conversationScopeId: "chat-b",
+    targetKey: "project-a",
+    workspaceSessionId: "ws_a",
+  });
+
+  assert.deepEqual(
+    store.listConversationBindings("chat-a").map((binding) => binding.workspaceSessionId).sort(),
+    ["ws_a", "ws_b"],
+  );
+  assert.deepEqual(
+    store.listConversationBindings("chat-b").map((binding) => binding.workspaceSessionId),
+    ["ws_a"],
+  );
+});
+
 test("pruned worktree sessions retain recovery state and can be reactivated", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-workspace-store-test-"));
   const store = new SqliteWorkspaceStore(stateDir);
@@ -65,6 +102,44 @@ test("pruned worktree sessions retain recovery state and can be reactivated", as
   assert.equal(unwrap(store.reactivateSession("ws_recoverable")), true);
   assert.equal(store.getSession("ws_recoverable")?.status, "active");
   assert.equal(store.getSession("ws_recoverable")?.recoveryKind, undefined);
+});
+
+test("task checkpoints persist per workspace session and update in place", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-workspace-store-test-"));
+  const store = new SqliteWorkspaceStore(stateDir);
+  t.after(async () => {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  store.createSession({
+    id: "ws_task",
+    root: "/tmp/task",
+    mode: "checkout",
+  });
+  const first = store.setTaskCheckpoint({
+    workspaceSessionId: "ws_task",
+    status: "active",
+    summary: "Implemented the first slice.",
+    nextStep: "Run focused tests.",
+    snapshotRef: "a".repeat(40),
+  });
+  assert.deepEqual(store.getTaskCheckpoint("ws_task"), first);
+
+  const second = store.setTaskCheckpoint({
+    workspaceSessionId: "ws_task",
+    status: "blocked",
+    summary: "Focused tests exposed a migration issue.",
+    nextStep: "Fix migration coverage.",
+    snapshotRef: "b".repeat(40),
+  });
+  assert.equal(second.createdAt, first.createdAt);
+  assert.equal(second.status, "blocked");
+  assert.equal(second.snapshotRef, "b".repeat(40));
+  assert.deepEqual(store.getTaskCheckpoint("ws_task"), second);
+
+  unwrap(store.deleteSession("ws_task"));
+  assert.equal(store.getTaskCheckpoint("ws_task"), undefined);
 });
 
 function unwrap<T, E>(result: BetterResult<T, E>): T {

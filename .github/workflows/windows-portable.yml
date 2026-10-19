@@ -1,0 +1,104 @@
+name: Windows portable release
+
+on:
+  push:
+    branches:
+      - candidate/persistent-workspace-channel-v1
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.0.8-beta.1 (candidate) or v1.0.8 (main)"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-portable-release
+  cancel-in-progress: false
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify release branch and version
+        id: version
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          $tag = $env:TAG
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $sourceVersion = (node -p "require('./package.json').version").Trim()
+            if ($sourceVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Expected a stable package version for generating a preview release." }
+            $tag = "v$sourceVersion-beta.$env:GITHUB_RUN_NUMBER"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$') { throw "Unsupported tag format." }
+          if ($env:GITHUB_REF -eq 'refs/heads/main') {
+            if ($tag -match '-') { throw "Stable main releases must not have a prerelease tag." }
+          } elseif ($env:GITHUB_REF -like 'refs/heads/candidate/*') {
+            if ($tag -notmatch '-') { throw "Candidates may publish prereleases only." }
+          } else { throw "Only main or candidate branches can publish." }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+      - name: Setup pnpm
+        shell: pwsh
+        run: |
+          npm install --global corepack@0.34.5
+          corepack enable
+          corepack prepare pnpm@11.25.0 --activate
+      - name: Install, validate, build
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          if ($LASTEXITCODE -ne 0) { throw "Typecheck failed." }
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+      - name: Dependency audit (stable release gate)
+        id: security_audit
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pnpm audit --prod
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dependency audit failed. The ZIP can be retained as a CI artifact for review, but it must not be published as a GitHub Release."
+          }
+      - name: Package Windows ZIP with Node runtime and native dependencies
+        shell: pwsh
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          ./scripts/package-portable.ps1 -Tag $env:TAG
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devpilot-windows-portable
+          path: |
+            releases/*.zip
+            releases/*.sha256
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: steps.security_audit.outcome == 'success'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $flags = @("--generate-notes")
+          if ($env:TAG -match '-') { $flags += "--prerelease" }
+          gh release create $env:TAG "releases/DevPilot-windows-x64-$env:TAG.zip" "releases/DevPilot-windows-x64-$env:TAG.zip.sha256" --title "DevPilot $env:TAG" --target $env:GITHUB_SHA @flags
+      - name: Block public release when security findings remain
+        if: steps.security_audit.outcome != 'success'
+        shell: pwsh
+        run: |
+          throw "Security audit has unresolved advisories. The Windows ZIP is uploaded as a CI artifact for examination only; no public Release was created."

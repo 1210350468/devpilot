@@ -14,6 +14,7 @@ export interface ServerConfig {
   port: number;
   oauth: OAuthConfig;
   allowedRoots: string[];
+  permissionMode: "restricted" | "full";
   allowedHosts: string[];
   publicBaseUrl: string;
   toolMode: ToolMode;
@@ -62,7 +63,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       allowedResourceUrls: stored.oauth.allowedResourceUrls,
       allowedRedirectHosts: stored.oauth.allowedRedirectHosts,
     },
-    allowedRoots: normalizePaths(stored.workspaces.allowedRoots, [process.cwd()]),
+    allowedRoots: stored.workspaces.permissionMode === "full"
+      ? ["*"]
+      : normalizePaths(stored.workspaces.allowedRoots, [process.cwd()]),
+    permissionMode: stored.workspaces.permissionMode,
     allowedHosts: normalizeAllowedHosts(derivedAllowedHosts),
     publicBaseUrl,
     toolMode: stored.tools.mode,
