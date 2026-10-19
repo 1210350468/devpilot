@@ -68,6 +68,14 @@
             "minLength": 1
           }
         },
+        "permissionMode": {
+          "default": "restricted",
+          "type": "string",
+          "enum": [
+            "restricted",
+            "full"
+          ]
+        },
         "worktreeRoot": {
           "default": "~/.devspace/worktrees",
           "type": "string",

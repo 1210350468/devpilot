@@ -138,9 +138,12 @@ function serverInstructions(
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in available_agents_files, use ${toolNames.read} to inspect that instruction file and follow it. `;
   const common = `Call ${toolNames.openWorkspace} when starting work in a project folder or isolated worktree without a usable workspace_id, then reuse the returned workspace_id for subsequent operations in that workspace.`;
+  const permissions = config.permissionMode === "full"
+    ? " The local operator has enabled Full Access for opening workspace directories. This permits paths outside the normal allowedRoots, but does not change operating-system privileges, separate remote credentials, or workspace-scoped path semantics."
+    : "";
   const goalInstruction = " When the user explicitly asks for a persistent Goal, use the goal tool to store its objective, acceptance criteria, evidence, and resumable state. The host remains the reasoning agent; do not substitute local subagents for Goal reasoning unless the user separately requests them.";
 
-  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}${goalInstruction}`;
+  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}${goalInstruction}${permissions}`;
 }
 
 function formatVisibleAgent(agent: {

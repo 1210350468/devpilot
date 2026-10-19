@@ -33,7 +33,7 @@ export function isPathInsideRoot(path: string, root: string): boolean {
 
 export function assertAllowedPath(path: string, allowedRoots: string[]): string {
   const resolvedPath = resolve(expandHomePath(path));
-  if (allowedRoots.some((root) => isPathInsideRoot(resolvedPath, root))) {
+  if (allowedRoots.some((root) => root === "*" || isPathInsideRoot(resolvedPath, root))) {
     return resolvedPath;
   }
 

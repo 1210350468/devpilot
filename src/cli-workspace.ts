@@ -24,7 +24,7 @@ export function resolveCliWorkspaceContext(
 
   return {
     workspaceId,
-    workspaceRoot: assertAllowedPath(candidate, allowedRoots.map(canonicalizePath)),
+    workspaceRoot: assertAllowedPath(candidate, allowedRoots.map(root => root === "*" ? root : canonicalizePath(root))),
   };
 }
 

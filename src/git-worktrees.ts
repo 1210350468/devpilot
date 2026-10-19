@@ -434,6 +434,7 @@ async function assertManagedWorktreePath(worktreePath: string, worktreeRoot: str
 async function assertCleanupSourceRootAllowed(sourceRoot: string, allowedRoots: string[]): Promise<string> {
   const logicalRoot = assertAllowedPath(sourceRoot, allowedRoots);
   const canonicalSourceRoot = await realpath(logicalRoot);
+  if (allowedRoots.includes("*")) return canonicalSourceRoot;
   for (const allowedRoot of allowedRoots) {
     const canonicalAllowedRoot = await realpath(allowedRoot).catch(() => undefined);
     if (canonicalAllowedRoot && isPathInsideRoot(canonicalSourceRoot, canonicalAllowedRoot)) {

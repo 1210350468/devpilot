@@ -49,6 +49,14 @@ bash
 
 ## 快速开始
 
+### 完全权限模式（Full Access）
+
+DevPilot 默认只允许在 `allowedRoots` 所列目录中打开工作区。若你需要在自己的电脑上操作桌面或任意盘符，可以在本地 Control Center 的**设置 → 本机文件权限**里选择**完全权限模式**，阅读风险确认后保存并重启 MCP 服务。
+
+开启后，已授权的 MCP 客户端能够以**当前 Windows 用户身份**打开任何该账户可访问的目录；不会自动获得管理员权限，也不会突破系统 ACL、第三方平台审核或远程 SSH 的独立认证。受限目录列表会原样保存，日后切回受限模式无需重新配置。**不要把完全权限的 MCP 连接分享给不受信任的用户或公开暴露认证凭据。**
+
+如果使用 JSONC 配置管理，也可在私有 `config.jsonc` 中设置 `workspaces.permissionMode` 为 `"full"`（恢复时改回 `"restricted"`），重启生效。
+
 ### Windows 便携安装包（无需自行安装 Node.js）
 
 在 [GitHub Releases](https://github.com/1210350468/devpilot/releases) 下载与你信任的版本对应的

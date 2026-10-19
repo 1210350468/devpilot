@@ -444,7 +444,7 @@ export class DevPilotSupervisor {
     this.app.get("/devpilot/api/settings", localOnly, (_req, res) => {
       res.json(this.settingsPayload());
     });
-    this.app.post("/devpilot/api/settings", localOnly, (req, res) => {
+    this.app.post("/devpilot/api/settings", localOnly, controlAction, (req, res) => {
       try {
         const result = this.saveSettings(req.body as Record<string, unknown>);
         res.json(result);
@@ -466,7 +466,8 @@ export class DevPilotSupervisor {
       effective: {
         host: saved.host,
         port: saved.port,
-        allowedRoots: saved.allowedRoots,
+        allowedRoots: files.config.workspaces.allowedRoots,
+        permissionMode: saved.permissionMode,
         authMode: this.config.tunnelProvider === "openai-secure" ? "secure-tunnel" : "oauth",
         toolMode: saved.toolMode,
         uiEnabled: saved.uiEnabled,
@@ -481,6 +482,7 @@ export class DevPilotSupervisor {
         host: this.serverConfig.host,
         port: this.serverConfig.port,
         allowedRoots: this.serverConfig.allowedRoots,
+        permissionMode: this.serverConfig.permissionMode,
         toolMode: this.serverConfig.toolMode,
       },
       saved: files.config,
@@ -500,6 +502,14 @@ export class DevPilotSupervisor {
         path: ["workspaces", "allowedRoots"],
         value: body.allowedRoots.map((item) => item.trim()).filter(Boolean),
       });
+    }
+    if (body.permissionMode === "full" || body.permissionMode === "restricted") {
+      const current = loadDevspaceFiles().config.workspaces.permissionMode;
+      if (body.permissionMode === "full" && current !== "full"
+        && body.confirmFullAccess !== "ENABLE FULL ACCESS") {
+        throw new Error("Enabling Full Access requires explicit local confirmation.");
+      }
+      edits.push({ path: ["workspaces", "permissionMode"], value: body.permissionMode });
     }
     if (body.toolMode === "codex" || body.toolMode === "claude") {
       edits.push({ path: ["tools", "mode"], value: body.toolMode });

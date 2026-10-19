@@ -79,6 +79,7 @@ interface SettingsResponse {
     host: string;
     port: number;
     allowedRoots: string[];
+    permissionMode: "restricted" | "full";
     authMode: "oauth" | "secure-tunnel";
     toolMode: "codex" | "claude";
     uiEnabled: boolean;
@@ -93,6 +94,7 @@ interface SettingsResponse {
     host: string;
     port: number;
     allowedRoots: string[];
+    permissionMode: "restricted" | "full";
     toolMode: "codex" | "claude";
   };
 }
@@ -478,6 +480,7 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("47681");
   const [roots, setRoots] = useState("");
+  const [permissionMode, setPermissionMode] = useState<"restricted" | "full">("restricted");
   const [toolMode, setToolMode] = useState<"codex" | "claude">("codex");
   const [uiEnabled, setUiEnabled] = useState(true);
   const [artifactsEnabled, setArtifactsEnabled] = useState(true);
@@ -494,6 +497,7 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
     setHost(settings.effective.host);
     setPort(String(settings.effective.port));
     setRoots(settings.effective.allowedRoots.join("\n"));
+    setPermissionMode(settings.effective.permissionMode);
     setToolMode(settings.effective.toolMode);
     setUiEnabled(settings.effective.uiEnabled);
     setArtifactsEnabled(settings.effective.artifactsEnabled);
@@ -505,15 +509,19 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
   }, [settings?.configPath]);
 
   const save = async () => {
+    const enablingFull = permissionMode === "full" && settings?.effective.permissionMode !== "full";
+    if (enablingFull && !window.confirm("完全权限模式将允许已连接的 MCP 客户端以你的 Windows 用户身份访问所有可访问文件夹，包括桌面和其他磁盘。继续开启？")) return;
     setMessage("正在保存…");
     try {
       const response = await fetch("/devpilot/api/settings", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-devpilot-control": "1" },
         body: JSON.stringify({
           host,
           port: Number(port),
           allowedRoots: roots.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
+          permissionMode,
+          ...(enablingFull ? { confirmFullAccess: "ENABLE FULL ACCESS" } : {}),
           toolMode,
           uiEnabled,
           artifactsEnabled,
@@ -545,7 +553,9 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
       <label className="form-row"><span>监听地址</span><input value={host} onChange={(event) => setHost(event.target.value)} /></label>
       <label className="form-row"><span>MCP 端口</span><input value={port} inputMode="numeric" onChange={(event) => setPort(event.target.value)} /></label>
       <label className="form-row"><span>工具 Surface</span><select value={toolMode} onChange={(event) => setToolMode(event.target.value as "codex" | "claude")}><option value="codex">Codex：apply_patch + exec_command + write_stdin + workspace_turn</option><option value="claude">Claude：write + edit + bash</option></select></label>
-      <label className="form-row vertical"><span>允许目录</span><textarea rows={5} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
+      <label className="form-row"><span>本机文件权限</span><select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as "restricted" | "full")}><option value="restricted">受限模式（只允许指定目录）</option><option value="full">完全权限模式（允许此账户可访问的全部路径）</option></select></label>
+      {permissionMode === "full" && <p className="settings-copy">⚠ 完全权限模式会扩大所有已授权 MCP 客户端可打开的工作区范围。此模式不授予 Windows 管理员权限，也不绕过操作系统及平台的安全检查；推荐只在可信账号和私有连接下开启。</p>}
+      <label className="form-row vertical"><span>允许目录（受限模式生效，切换回受限后恢复使用）</span><textarea rows={5} value={roots} onChange={(event) => setRoots(event.target.value)} /></label>
       <label className="form-row vertical"><span>Public Base URL</span><input value={publicBaseUrl} onChange={(event) => setPublicBaseUrl(event.target.value)} /></label>
       <Toggle label="MCP App UI" checked={uiEnabled} onChange={setUiEnabled} />
       <Toggle label="Artifacts" checked={artifactsEnabled} onChange={setArtifactsEnabled} />
@@ -558,6 +568,7 @@ function SettingsView({ settings, status, onSaved, onRestart }: { settings: Sett
     <Panel title="当前运行状态" subtitle="保存值和当前内存配置可能在重启前不同。">
       <InfoRow label="认证" value={settings?.effective.authMode === "secure-tunnel" ? "OpenAI Secure Tunnel" : "OAuth"} />
       <InfoRow label="运行 Surface" value={settings?.runtime.toolMode ?? "—"} />
+      <InfoRow label="当前本机权限" value={settings?.runtime.permissionMode === "full" ? "完全权限" : "受限目录"} />
       <InfoRow label="运行端口" value={String(settings?.runtime.port ?? "—")} />
       <InfoRow label="Tunnel" value={status?.tunnel.ready ? "READY" : status?.tunnel.state ?? "—"} />
       <InfoRow label="Request Observer" value={status?.requestObserver.enabled ? `启用 · ${status.requestObserver.retained} 条` : "关闭"} />
